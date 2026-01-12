@@ -1,0 +1,32 @@
+# Data files
+*.csv
+*.pkl
+*.db
+*.html
+
+# Cached files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Config
+.trade_journal_config.json
