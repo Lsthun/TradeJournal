@@ -217,14 +217,19 @@ class TradingJournalCLI:
             print("Error: Symbol cannot be empty.")
             return
         
-        trades = self.journal.get_trades(symbol)
-        if not trades:
-            print(f"\nNo trades found for {symbol.upper()}.")
-            return
+        symbol_upper = symbol.upper()
+        print(f"\n--- Trades for {symbol_upper} ---")
         
-        print(f"\n--- Trades for {symbol.upper()} ({len(trades)} total) ---")
-        for i, trade in enumerate(trades):
-            print(f"{i}. {trade}")
+        found_count = 0
+        for i, trade in enumerate(self.journal.trades):
+            if trade.symbol == symbol_upper:
+                print(f"{i}. {trade}")
+                found_count += 1
+        
+        if found_count == 0:
+            print(f"No trades found for {symbol_upper}.")
+        else:
+            print(f"\n({found_count} total)")
     
     def delete_trade(self) -> None:
         """Delete a trade."""
