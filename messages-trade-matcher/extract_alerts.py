@@ -12,6 +12,14 @@ from zoneinfo import ZoneInfo
 import os
 import sys
 
+# ============================================================================
+# Configuration: Set the start date for pulling messages
+# Format: "YYYY-MM-DD" (e.g., "2025-05-01" for May 1, 2025)
+# Set to None to include all messages
+# ============================================================================
+START_DATE = "2025-05-01"  # Change this to your desired start date
+# ============================================================================
+
 
 def convert_apple_timestamp(apple_time):
     """
@@ -157,12 +165,34 @@ def main():
         
         # Process rows and extract strategy alerts from sender 81861
         data = []
+        
+        # Parse start date if provided
+        start_date_dt = None
+        if START_DATE:
+            try:
+                start_date_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
+                print(f"Filtering messages from {START_DATE} onwards", file=sys.stderr)
+            except ValueError:
+                print(f"Error: Invalid START_DATE format '{START_DATE}'. Use 'YYYY-MM-DD'", file=sys.stderr)
+                sys.exit(1)
+        
         for message_id, apple_time, text, sender in rows:
             # Filter for messages from sender 81861
             if sender != "81861":
                 continue
             
             timestamp_local = convert_apple_timestamp(apple_time)
+            
+            # Apply date filter if START_DATE is set
+            if start_date_dt and timestamp_local:
+                try:
+                    message_dt = datetime.fromisoformat(timestamp_local)
+                    # Compare dates only (ignore time)
+                    if message_dt.date() < start_date_dt.date():
+                        continue
+                except ValueError:
+                    pass
+            
             strategy, symbols = parse_strategy_and_symbols(text)
             
             # Create one row per symbol
@@ -174,9 +204,14 @@ def main():
                         "symbol": symbol
                     })
         
-        # Write to CSV using pandas
+        # Write to CSV using pandas with timestamped filename
         df = pd.DataFrame(data)
-        output_file = "alerts.csv"
+        
+        # Generate timestamped filename to avoid overwriting existing files
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%d_%H.%M")
+        output_file = f"alerts_{timestamp}.csv"
+        
         df.to_csv(output_file, index=False)
         
         print(f"Successfully exported {len(df)} alerts to {output_file}")
