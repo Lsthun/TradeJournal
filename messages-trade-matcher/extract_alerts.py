@@ -3,6 +3,14 @@
 Extract stock screener alert messages from macOS Messages SQLite database.
 
 This script reads from chat_backup.db and exports messages to alerts.csv.
+
+TO REFRESH YOUR DATABASE WITH NEW MESSAGES:
+  1. Open Finder and press Cmd+Shift+G (Go to Folder)
+  2. Paste this path: ~/Library/Messages
+  3. Find the file named "chat.db"
+  4. Copy it to your Desktop and rename to "chat_backup.db"
+     (Replace your old chat_backup.db file)
+  5. Run this script again to extract the latest alerts
 """
 
 import sqlite3
@@ -204,14 +212,9 @@ def main():
                         "symbol": symbol
                     })
         
-        # Write to CSV using pandas with timestamped filename
+        # Write to CSV using pandas
         df = pd.DataFrame(data)
-        
-        # Generate timestamped filename to avoid overwriting existing files
-        now = datetime.now()
-        timestamp = now.strftime("%Y-%m-%d_%H.%M")
-        output_file = f"alerts_{timestamp}.csv"
-        
+        output_file = "alerts.csv"
         df.to_csv(output_file, index=False)
         
         print(f"Successfully exported {len(df)} alerts to {output_file}")

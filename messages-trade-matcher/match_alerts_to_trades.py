@@ -111,6 +111,36 @@ def get_trade_symbol(trade) -> str:
     return None
 
 
+def remove_duplicate_alerts(alerts_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove duplicate alerts based on symbol and strategy combination.
+    Keeps the first occurrence of each symbol-strategy pair.
+    
+    Args:
+        alerts_df: DataFrame with alert data
+        
+    Returns:
+        DataFrame with duplicates removed
+    """
+    if alerts_df.empty:
+        return alerts_df
+    
+    # Create a composite key of symbol and strategy
+    alerts_df['_composite_key'] = alerts_df['symbol'].str.upper() + '|' + alerts_df['strategy'].fillna('UNKNOWN')
+    
+    # Keep only the first occurrence of each composite key
+    deduped_df = alerts_df.drop_duplicates(subset=['_composite_key'], keep='first')
+    
+    # Remove the temporary composite key column
+    deduped_df = deduped_df.drop(columns=['_composite_key'])
+    
+    duplicates_removed = len(alerts_df) - len(deduped_df)
+    if duplicates_removed > 0:
+        print(f"Removed {duplicates_removed} duplicate alerts", file=sys.stderr)
+    
+    return deduped_df.reset_index(drop=True)
+
+
 def main():
     """Main function to match alerts to trades."""
     
@@ -126,6 +156,9 @@ def main():
     if alerts_df.empty:
         print("No alerts to process.", file=sys.stderr)
         return
+    
+    # Remove duplicate alerts (same symbol and strategy)
+    alerts_df = remove_duplicate_alerts(alerts_df)
     
     if not trades:
         print("No trades found in journal.", file=sys.stderr)
