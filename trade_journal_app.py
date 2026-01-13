@@ -2852,33 +2852,76 @@ class TradeJournalApp:
         if not filepath:
             return
         
-        # Prompt user for label/description
-        label = simpledialog.askstring("Screenshot Label", "Enter a label/description for this screenshot (optional):", parent=self.root)
-        if label is None:  # User clicked Cancel
-            return
-        label = label.strip()
+        # Show preview dialog with image and label input
+        preview_win = tk.Toplevel(self.root)
+        preview_win.title("Screenshot Preview")
+        preview_win.geometry("500x600")
         
-        # Add screenshot to list (initialize if needed)
-        if key not in self.model.screenshots:
-            self.model.screenshots[key] = []
+        # Load and display the image
+        photo = None
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+            img = Image.open(filepath)
+            img.thumbnail((450, 400))
+            photo = ImageTk.PhotoImage(img)
+        except Exception:
+            try:
+                photo = tk.PhotoImage(file=filepath)
+            except Exception:
+                photo = None
         
-        # Store path as relative if possible (for portability across machines)
-        stored_path = self._make_screenshot_path_relative(filepath)
+        if photo:
+            img_label = tk.Label(preview_win, image=photo)
+            img_label.image = photo
+            img_label.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        else:
+            error_label = tk.Label(preview_win, text="Could not load image preview", fg="red")
+            error_label.pack(pady=10)
         
-        # Create screenshot entry with filepath and label
-        screenshot_entry = {"filepath": stored_path, "label": label if label else os.path.basename(filepath)}
+        # Label input frame
+        label_frame = ttk.Frame(preview_win)
+        label_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        # Check if this file is already attached
-        if not any(s["filepath"] == stored_path for s in self.model.screenshots[key]):
-            self.model.screenshots[key].append(screenshot_entry)
+        ttk.Label(label_frame, text="Label (optional):").pack(anchor="w")
+        label_entry = tk.Text(label_frame, height=3, width=50)
+        label_entry.pack(fill=tk.BOTH, expand=True, pady=(5, 10))
         
-        # Update screenshot display
-        num_screenshots = len(self.model.screenshots[key])
-        self.screenshot_var.set(f"{num_screenshots} screenshot(s)")
-        # Load preview of the first screenshot
-        if self.model.screenshots[key]:
-            resolved_path = self._resolve_screenshot_path(self.model.screenshots[key][0]["filepath"])
-            self._update_screenshot_preview(resolved_path)
+        # Buttons
+        button_frame = ttk.Frame(preview_win)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        def add_it():
+            label = label_entry.get("1.0", tk.END).strip()
+            
+            # Add screenshot to list (initialize if needed)
+            if key not in self.model.screenshots:
+                self.model.screenshots[key] = []
+            
+            # Store path as relative if possible (for portability across machines)
+            stored_path = self._make_screenshot_path_relative(filepath)
+            
+            # Create screenshot entry with filepath and label
+            screenshot_entry = {"filepath": stored_path, "label": label if label else os.path.basename(filepath)}
+            
+            # Check if this file is already attached
+            if not any(s["filepath"] == stored_path for s in self.model.screenshots[key]):
+                self.model.screenshots[key].append(screenshot_entry)
+            
+            # Update screenshot display
+            num_screenshots = len(self.model.screenshots[key])
+            self.screenshot_var.set(f"{num_screenshots} screenshot(s)")
+            # Load preview of the first screenshot
+            if self.model.screenshots[key]:
+                resolved_path = self._resolve_screenshot_path(self.model.screenshots[key][0]["filepath"])
+                self._update_screenshot_preview(resolved_path)
+            
+            preview_win.destroy()
+        
+        def cancel_it():
+            preview_win.destroy()
+        
+        ttk.Button(button_frame, text="Add Screenshot", command=add_it).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=cancel_it).pack(side=tk.LEFT, padx=5)
     
     def _update_screenshot_preview(self, filepath: str) -> None:
         """Load and display a preview of the given screenshot."""
