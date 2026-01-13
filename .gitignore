@@ -1,5 +1,6 @@
 # Data files
 *.csv
+!alerts_matched.csv
 *.pkl
 *.db
 *.html
