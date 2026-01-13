@@ -1126,23 +1126,24 @@ class TradeJournalApp:
             # Special case for pnl_pct to show % symbol
             if col == "pnl_pct":
                 header = "Pnl %"
-            # Attach a command to each heading to allow sorting
+            # Attach a command to each heading to allow sorting and column reordering
             self.tree.heading(col, text=header, command=lambda c=col: self.on_sort(c))
-            # Set reasonable widths
-            if col in {"account", "symbol"}:
-                self.tree.column(col, width=90)
-            elif col in {"entry_date", "exit_date"}:
-                self.tree.column(col, width=100)
-            elif col in {"entry_price", "exit_price", "pnl", "quantity"}:
-                self.tree.column(col, width=80, anchor=tk.E)
-            elif col == "pnl_pct":
-                self.tree.column(col, width=100, anchor=tk.E)
-            elif col == "hold_period":
-                self.tree.column(col, width=80, anchor=tk.E)
+            # Configure column with sensible min width but allow stretch
+            # move=True allows users to drag columns to reorder them
+            min_width = 70  # Minimum width for most columns
+            if col in {"note", "entry_strategy", "exit_strategy"}:
+                min_width = 100
+            elif col in {"account", "symbol", "entry_date", "exit_date"}:
+                min_width = 85
+            
+            anchor = tk.W  # Default left align
+            if col in {"entry_price", "exit_price", "pnl", "quantity", "pnl_pct", "hold_period"}:
+                anchor = tk.E  # Right align for numbers
             elif col == "screenshot":
-                self.tree.column(col, width=70, anchor=tk.CENTER)
-            elif col == "note":
-                self.tree.column(col, width=150)
+                anchor = tk.CENTER
+            
+            self.tree.column(col, width=min_width, minwidth=min_width, stretch=True, anchor=anchor)
+        
         # Scrollbars
         vsb = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(self.table_frame, orient="horizontal", command=self.tree.xview)
