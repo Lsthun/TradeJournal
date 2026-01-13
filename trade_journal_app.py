@@ -451,8 +451,9 @@ class TradeJournalModel:
         self.notes: Dict[tuple, str] = {}
         # Counter for assigning unique IDs to buys
         self.next_buy_id: int = 0
-        # Screenshots keyed by unique trade key (list of image paths for multiple screenshots)
-        self.screenshots: Dict[tuple, List[str]] = {}
+        # Screenshots keyed by unique trade key (list of dicts with filepath and label)
+        # Format: {key: [{"filepath": "path", "label": "description"}, ...]}
+        self.screenshots: Dict[tuple, List[Dict[str, str]]] = {}
         # Set of unique transaction keys to detect duplicates across sessions
         # Each key is a tuple of (run_date, account_number, symbol, quantity, price, amount)
         self.seen_tx_keys: set = set()
@@ -1239,11 +1240,8 @@ class TradeJournalApp:
         add_ss_btn = ttk.Button(right_scrollable_frame, text="Add Screenshot", command=self.add_screenshot)
         add_ss_btn.pack(anchor="w", pady=(5, 0))
         # Button to view screenshots in a zoomed window
-        view_ss_btn = ttk.Button(right_scrollable_frame, text="View Screenshots", command=self.view_screenshots)
-        view_ss_btn.pack(anchor="w", pady=(0, 2))
-        # Button to remove all screenshots
-        remove_ss_btn = ttk.Button(right_scrollable_frame, text="Remove Screenshots", command=self.remove_screenshot)
-        remove_ss_btn.pack(anchor="w", pady=(0, 5))
+        view_ss_btn = ttk.Button(right_scrollable_frame, text="View/Remove Screenshots", command=self.view_screenshots)
+        view_ss_btn.pack(anchor="w", pady=(0, 5))
         # Label to display screenshot count
         ttk.Label(right_scrollable_frame, text="Screenshots:").pack(anchor="w", pady=(10, 0))
         self.screenshot_var = tk.StringVar(value="")
@@ -2522,7 +2520,7 @@ class TradeJournalApp:
             if ss_list and len(ss_list) > 0:
                 self.screenshot_var.set(f"{len(ss_list)} screenshot(s)")
                 # Try to load preview of first screenshot
-                self._update_screenshot_preview(ss_list[0])
+                self._update_screenshot_preview(ss_list[0]["filepath"])
             else:
                 self.screenshot_var.set("(none)")
                 self.screenshot_preview_label.configure(image="")
@@ -2589,7 +2587,7 @@ class TradeJournalApp:
         self.populate_table()
 
     def add_screenshot(self) -> None:
-        """Add a screenshot file to the selected trade (supports multiple screenshots)."""
+        """Add a screenshot file to the selected trade with an optional label."""
         selected = self.tree.selection()
         if not selected:
             messagebox.showinfo("No Selection", "Please select a trade to attach a screenshot.")
@@ -2607,17 +2605,30 @@ class TradeJournalApp:
         filepath = filedialog.askopenfilename(title="Select Image", filetypes=filetypes)
         if not filepath:
             return
+        
+        # Prompt user for label/description
+        label = simpledialog.askstring("Screenshot Label", "Enter a label/description for this screenshot (optional):", parent=self.root)
+        if label is None:  # User clicked Cancel
+            return
+        label = label.strip()
+        
         # Add screenshot to list (initialize if needed)
         if key not in self.model.screenshots:
             self.model.screenshots[key] = []
-        if filepath not in self.model.screenshots[key]:
-            self.model.screenshots[key].append(filepath)
+        
+        # Create screenshot entry with filepath and label
+        screenshot_entry = {"filepath": filepath, "label": label if label else os.path.basename(filepath)}
+        
+        # Check if this file is already attached
+        if not any(s["filepath"] == filepath for s in self.model.screenshots[key]):
+            self.model.screenshots[key].append(screenshot_entry)
+        
         # Update screenshot display
         num_screenshots = len(self.model.screenshots[key])
         self.screenshot_var.set(f"{num_screenshots} screenshot(s)")
         # Load preview of the first screenshot
         if self.model.screenshots[key]:
-            self._update_screenshot_preview(self.model.screenshots[key][0])
+            self._update_screenshot_preview(self.model.screenshots[key][0]["filepath"])
     
     def _update_screenshot_preview(self, filepath: str) -> None:
         """Load and display a preview of the given screenshot."""
@@ -2640,7 +2651,7 @@ class TradeJournalApp:
             self.screenshot_preview_label.image = None
 
     def view_screenshots(self) -> None:
-        """Open a window showing all screenshots for the selected trade."""
+        """Open a window showing all screenshots for the selected trade with labels and removal option."""
         selected = self.tree.selection()
         if not selected:
             messagebox.showinfo("No Selection", "Please select a trade to view its screenshots.")
@@ -2657,7 +2668,7 @@ class TradeJournalApp:
         # Create a new window
         ss_window = tk.Toplevel(self.root)
         ss_window.title("Screenshots")
-        ss_window.geometry("800x600")
+        ss_window.geometry("900x650")
         
         screenshots = self.model.screenshots[key]
         
@@ -2669,19 +2680,27 @@ class TradeJournalApp:
         current_index = [0]
         
         def update_image():
-            """Update the displayed image."""
-            filepath = screenshots[current_index[0]]
+            """Update the displayed image and label."""
+            screenshot_data = screenshots[current_index[0]]
+            filepath = screenshot_data["filepath"]
+            label = screenshot_data.get("label", "")
+            
             try:
                 from PIL import Image, ImageTk  # type: ignore
                 img = Image.open(filepath)
                 # Scale to fit window while maintaining aspect ratio
-                img.thumbnail((750, 500))
+                img.thumbnail((850, 500))
                 photo = ImageTk.PhotoImage(img)
                 img_label.configure(image=photo)
                 img_label.image = photo
-                counter_label.config(text=f"Screenshot {current_index[0] + 1} of {len(screenshots)}")
             except Exception as e:
                 img_label.configure(text=f"Could not load image: {e}")
+            
+            # Update labels
+            counter_text = f"Screenshot {current_index[0] + 1} of {len(screenshots)}"
+            counter_label.config(text=counter_text)
+            label_text = f"Label: {label}" if label else "Label: (none)"
+            label_display.config(text=label_text)
         
         def prev_image():
             if current_index[0] > 0:
@@ -2693,15 +2712,40 @@ class TradeJournalApp:
                 current_index[0] += 1
                 update_image()
         
+        def remove_current():
+            """Remove the currently displayed screenshot."""
+            if messagebox.askyesno("Remove Screenshot", f"Remove this screenshot ('{screenshots[current_index[0]].get('label', 'Untitled')}')?"):
+                screenshots.pop(current_index[0])
+                if not screenshots:
+                    # No more screenshots, close window
+                    messagebox.showinfo("Removed", "All screenshots have been removed.")
+                    ss_window.destroy()
+                    # Clear preview in main window
+                    self.screenshot_var.set("(none)")
+                    self.screenshot_preview_label.configure(image="")
+                    self.screenshot_preview_label.image = None
+                else:
+                    # Adjust index if needed
+                    if current_index[0] >= len(screenshots):
+                        current_index[0] = len(screenshots) - 1
+                    update_image()
+        
         # Navigation buttons
         prev_btn = ttk.Button(nav_frame, text="← Previous", command=prev_image)
         prev_btn.pack(side=tk.LEFT, padx=5)
         
         counter_label = ttk.Label(nav_frame, text="")
-        counter_label.pack(side=tk.LEFT, padx=20)
+        counter_label.pack(side=tk.LEFT, padx=10)
         
         next_btn = ttk.Button(nav_frame, text="Next →", command=next_image)
         next_btn.pack(side=tk.LEFT, padx=5)
+        
+        remove_btn = ttk.Button(nav_frame, text="Remove This", command=remove_current)
+        remove_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Label display
+        label_display = ttk.Label(nav_frame, text="")
+        label_display.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=True)
         
         # Image label
         img_label = ttk.Label(ss_window)
