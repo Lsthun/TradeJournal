@@ -2970,7 +2970,7 @@ class TradeJournalApp:
             self.screenshot_preview_label.image = None
 
     def view_screenshots(self) -> None:
-        """Open a window showing all screenshots for the selected trade with labels and removal option."""
+        """Open a window showing all screenshots for the selected trade with labels, notes, and removal option."""
         selected = self.tree.selection()
         if not selected:
             messagebox.showinfo("No Selection", "Please select a trade to view its screenshots.")
@@ -2987,7 +2987,7 @@ class TradeJournalApp:
         # Create a new window
         ss_window = tk.Toplevel(self.root)
         ss_window.title("Screenshots")
-        ss_window.geometry("900x650")
+        ss_window.geometry("900x800")
         
         screenshots = self.model.screenshots[key]
         
@@ -2999,7 +2999,7 @@ class TradeJournalApp:
         current_index = [0]
         
         def update_image():
-            """Update the displayed image and label."""
+            """Update the displayed image, label, and notes."""
             screenshot_data = screenshots[current_index[0]]
             filepath = screenshot_data["filepath"]
             resolved_path = self._resolve_screenshot_path(filepath)
@@ -3009,7 +3009,7 @@ class TradeJournalApp:
                 from PIL import Image, ImageTk  # type: ignore
                 img = Image.open(resolved_path)
                 # Scale to fit window while maintaining aspect ratio
-                img.thumbnail((850, 500))
+                img.thumbnail((850, 400))
                 photo = ImageTk.PhotoImage(img)
                 img_label.configure(image=photo)
                 img_label.image = photo
@@ -3019,8 +3019,19 @@ class TradeJournalApp:
             # Update labels
             counter_text = f"Screenshot {current_index[0] + 1} of {len(screenshots)}"
             counter_label.config(text=counter_text)
-            label_text = f"Label: {label}" if label else "Label: (none)"
-            label_display.config(text=label_text)
+            
+            # Update label field
+            label_text.config(state=tk.NORMAL)
+            label_text.delete("1.0", tk.END)
+            label_text.insert("1.0", label)
+            label_text.config(state=tk.NORMAL)
+            
+            # Update notes field
+            notes = self.model.notes.get(key, "")
+            notes_text.config(state=tk.NORMAL)
+            notes_text.delete("1.0", tk.END)
+            notes_text.insert("1.0", notes)
+            notes_text.config(state=tk.NORMAL)
         
         def prev_image():
             if current_index[0] > 0:
@@ -3050,15 +3061,22 @@ class TradeJournalApp:
                         current_index[0] = len(screenshots) - 1
                     update_image()
         
-        def edit_label():
-            """Edit the label of the currently displayed screenshot."""
-            current_data = screenshots[current_index[0]]
-            old_label = current_data.get("label", "")
-            new_label = simpledialog.askstring("Edit Label", "Enter new label:", initialvalue=old_label, parent=ss_window)
-            if new_label is not None:  # User didn't cancel
-                new_label = new_label.strip()
-                current_data["label"] = new_label if new_label else os.path.basename(current_data["filepath"])
-                update_image()
+        def save_changes():
+            """Save label and notes changes."""
+            # Get label from text widget
+            new_label = label_text.get("1.0", tk.END).strip()
+            screenshots[current_index[0]]["label"] = new_label if new_label else os.path.basename(screenshots[current_index[0]]["filepath"])
+            
+            # Get notes from text widget
+            new_notes = notes_text.get("1.0", tk.END).strip()
+            if new_notes:
+                self.model.notes[key] = new_notes
+            elif key in self.model.notes:
+                del self.model.notes[key]
+            
+            # Refresh and show confirmation
+            update_image()
+            messagebox.showinfo("Saved", "Label and notes updated successfully.")
         
         # Navigation buttons
         prev_btn = ttk.Button(nav_frame, text="← Previous", command=prev_image)
@@ -3070,19 +3088,27 @@ class TradeJournalApp:
         next_btn = ttk.Button(nav_frame, text="Next →", command=next_image)
         next_btn.pack(side=tk.LEFT, padx=5)
         
-        edit_btn = ttk.Button(nav_frame, text="Edit Label", command=edit_label)
-        edit_btn.pack(side=tk.LEFT, padx=5)
-        
         remove_btn = ttk.Button(nav_frame, text="Remove This", command=remove_current)
         remove_btn.pack(side=tk.LEFT, padx=5)
         
-        # Label display
-        label_display = ttk.Label(nav_frame, text="")
-        label_display.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=True)
+        save_btn = ttk.Button(nav_frame, text="Save Changes", command=save_changes)
+        save_btn.pack(side=tk.LEFT, padx=5)
         
         # Image label
         img_label = ttk.Label(ss_window)
         img_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Label frame
+        label_frame = ttk.LabelFrame(ss_window, text="Screenshot Label")
+        label_frame.pack(fill=tk.X, padx=10, pady=5)
+        label_text = tk.Text(label_frame, height=2, width=80, wrap=tk.WORD)
+        label_text.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Notes frame
+        notes_frame = ttk.LabelFrame(ss_window, text="Trade Notes")
+        notes_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        notes_text = tk.Text(notes_frame, height=6, width=80, wrap=tk.WORD)
+        notes_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Display first image
         update_image()
