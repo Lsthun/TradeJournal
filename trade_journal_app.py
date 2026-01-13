@@ -1398,19 +1398,20 @@ class TradeJournalApp:
         ttk.Label(right_scrollable_frame, text="(comma-separated for multiple)", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w")
         self.entry_strategy_text = tk.Text(right_scrollable_frame, height=3, width=30)
         self.entry_strategy_text.pack(fill=tk.X, pady=(0, 5))
+        self.entry_strategy_text.bind("<KeyRelease>", lambda e: self._auto_save_fields())
         
         # Exit Strategy label and text
         ttk.Label(right_scrollable_frame, text="Exit Strategy:").pack(anchor="w")
         ttk.Label(right_scrollable_frame, text="(comma-separated for multiple)", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w")
         self.exit_strategy_text = tk.Text(right_scrollable_frame, height=3, width=30)
         self.exit_strategy_text.pack(fill=tk.X, pady=(0, 5))
+        self.exit_strategy_text.bind("<KeyRelease>", lambda e: self._auto_save_fields())
         
         # Note label and text
         ttk.Label(right_scrollable_frame, text="Trade Note:").pack(anchor="w")
         self.note_text = tk.Text(right_scrollable_frame, height=5, width=30)
         self.note_text.pack(fill=tk.X, pady=(0, 5))
-        save_note_btn = ttk.Button(right_scrollable_frame, text="Save Note", command=self.save_note)
-        save_note_btn.pack(anchor="w")
+        self.note_text.bind("<KeyRelease>", lambda e: self._auto_save_fields())
         # Button to add screenshot
         add_ss_btn = ttk.Button(right_scrollable_frame, text="Add Screenshot", command=self.add_screenshot)
         add_ss_btn.pack(anchor="w", pady=(5, 0))
@@ -2847,23 +2848,36 @@ class TradeJournalApp:
         if key in self.model.screenshots and self.model.screenshots[key]:
             self.view_screenshots()
 
-    def save_note(self) -> None:
-        """Save the note and strategies for the selected trade entry."""
+    def _auto_save_fields(self) -> None:
+        """Auto-save note and strategies whenever fields are modified."""
         selected = self.tree.selection()
         if not selected:
-            messagebox.showinfo("No Selection", "Please select a trade to add a note.")
             return
         item_id = selected[0]
         key = self.id_to_key.get(item_id)
         if key is None:
-            messagebox.showinfo("Invalid Selection", "Please select an individual trade to add a note.")
             return
+        
+        # Auto-save note
         note = self.note_text.get("1.0", tk.END).strip()
-        self.model.notes[key] = note
+        if note:
+            self.model.notes[key] = note
+        elif key in self.model.notes:
+            del self.model.notes[key]
+        
+        # Auto-save entry strategy
         entry_strategy = self.entry_strategy_text.get("1.0", tk.END).strip()
-        self.model.entry_strategies[key] = entry_strategy
+        if entry_strategy:
+            self.model.entry_strategies[key] = entry_strategy
+        elif key in self.model.entry_strategies:
+            del self.model.entry_strategies[key]
+        
+        # Auto-save exit strategy
         exit_strategy = self.exit_strategy_text.get("1.0", tk.END).strip()
-        self.model.exit_strategies[key] = exit_strategy
+        if exit_strategy:
+            self.model.exit_strategies[key] = exit_strategy
+        elif key in self.model.exit_strategies:
+            del self.model.exit_strategies[key]
         
         # Persist changes to disk
         self.model.save_state(self.persist_path, filter_state={
@@ -2875,9 +2889,6 @@ class TradeJournalApp:
             "entry_strategy_filter": self.entry_strategy_filter_var.get(),
             "exit_strategy_filter": self.exit_strategy_filter_var.get(),
         })
-        
-        # Refresh the table to show all updates
-        self.populate_table()
 
     def _resolve_screenshot_path(self, filepath: str) -> str:
         """Resolve a screenshot filepath (relative or absolute) to absolute path.
