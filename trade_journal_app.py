@@ -2901,7 +2901,8 @@ class TradeJournalApp:
         button_frame = ttk.Frame(preview_win)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        def add_and_save():
+        def save_on_close():
+            """Auto-save screenshot and notes when dialog closes."""
             label = label_entry.get("1.0", tk.END).strip()
             notes = notes_entry.get("1.0", tk.END).strip()
             
@@ -2937,13 +2938,14 @@ class TradeJournalApp:
             if current_selection and item_id in current_selection:
                 # Trigger the on_tree_select logic to refresh all displays
                 self.on_tree_select(None)
-            
-            preview_win.destroy()
         
         def cancel_it():
             preview_win.destroy()
         
-        ttk.Button(button_frame, text="Add Screenshot & Save Notes", command=add_and_save).pack(side=tk.LEFT, padx=5)
+        # Save automatically on close
+        preview_win.protocol("WM_DELETE_WINDOW", lambda: (save_on_close(), preview_win.destroy()))
+        
+        ttk.Button(button_frame, text="Add Screenshot", command=lambda: (save_on_close(), preview_win.destroy())).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel_it).pack(side=tk.LEFT, padx=5)
     
     def _update_screenshot_preview(self, filepath: str) -> None:
@@ -3062,7 +3064,7 @@ class TradeJournalApp:
                     update_image()
         
         def save_changes():
-            """Save label and notes changes."""
+            """Auto-save label and notes changes."""
             # Get label from text widget
             new_label = label_text.get("1.0", tk.END).strip()
             screenshots[current_index[0]]["label"] = new_label if new_label else os.path.basename(screenshots[current_index[0]]["filepath"])
@@ -3074,9 +3076,13 @@ class TradeJournalApp:
             elif key in self.model.notes:
                 del self.model.notes[key]
             
-            # Refresh and show confirmation
-            update_image()
-            messagebox.showinfo("Saved", "Label and notes updated successfully.")
+            # Refresh main tree display if this trade is still selected
+            current_selection = self.tree.selection()
+            if current_selection and item_id in current_selection:
+                self.on_tree_select(None)
+        
+        # Setup auto-save when dialog closes
+        ss_window.protocol("WM_DELETE_WINDOW", lambda: (save_changes(), ss_window.destroy()))
         
         # Navigation buttons
         prev_btn = ttk.Button(nav_frame, text="← Previous", command=prev_image)
@@ -3090,9 +3096,6 @@ class TradeJournalApp:
         
         remove_btn = ttk.Button(nav_frame, text="Remove This", command=remove_current)
         remove_btn.pack(side=tk.LEFT, padx=5)
-        
-        save_btn = ttk.Button(nav_frame, text="Save Changes", command=save_changes)
-        save_btn.pack(side=tk.LEFT, padx=5)
         
         # Image label
         img_label = ttk.Label(ss_window)
