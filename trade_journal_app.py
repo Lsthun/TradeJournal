@@ -28,6 +28,7 @@ application.
 import csv
 import datetime as dt
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
@@ -128,6 +129,17 @@ def color_display_name(color_value: str) -> str:
             return name.capitalize()
     return "Custom"
 
+
+def format_strategy_for_table(strategy_str: str) -> str:
+    """Format a strategy string for single-line table display.
+
+    Splits on comma, CR/LF, semicolon, and tab, then joins with "; ".
+    """
+    if not strategy_str:
+        return ""
+    parts = [p.strip() for p in re.split(r"[,\r\n;\t]+", str(strategy_str)) if p.strip()]
+    return "; ".join(parts)
+
 def load_chart_settings():
     """Load chart settings from config file."""
     default_settings = {
@@ -197,6 +209,66 @@ class Transaction:
     def is_sell(self) -> bool:
         """Return True if the transaction represents a sale (quantity < 0)."""
         return self.quantity < 0
+
+
+class Tooltip:
+    """Create a tooltip for a Tkinter widget that shows on hover."""
+    
+    def __init__(self, widget, text: str, delay: int = 500):
+        """
+        Initialize tooltip.
+        
+        Args:
+            widget: The Tkinter widget to attach the tooltip to
+            text: The tooltip text to display
+            delay: Delay in milliseconds before showing tooltip
+        """
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tipwindow = None
+        self.id = None
+        self.x = self.y = 0
+        self.widget.bind("<Enter>", self.on_enter, add=True)
+        self.widget.bind("<Leave>", self.on_leave, add=True)
+        self.widget.bind("<Motion>", self.on_motion, add=True)
+    
+    def on_enter(self, event=None):
+        """Schedule tooltip to appear on mouse enter."""
+        if self.id:
+            self.widget.after_cancel(self.id)
+        self.id = self.widget.after(self.delay, self.show_tooltip)
+    
+    def on_leave(self, event=None):
+        """Hide tooltip on mouse leave."""
+        if self.id:
+            self.widget.after_cancel(self.id)
+            self.id = None
+        self.hide_tooltip()
+    
+    def on_motion(self, event=None):
+        """Update tooltip position on mouse motion."""
+        if self.tipwindow:
+            self.x = event.x_root + 10
+            self.y = event.y_root + 10
+            self.tipwindow.wm_geometry(f"+{self.x}+{self.y}")
+    
+    def show_tooltip(self):
+        """Display the tooltip window."""
+        if self.tipwindow or not self.text:
+            return
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{self.x}+{self.y}")
+        label = tk.Label(tw, text=self.text, background="#ffffe0", relief=tk.SOLID, borderwidth=1, font=("TkDefaultFont", 9))
+        label.pack(ipadx=1)
+    
+    def hide_tooltip(self):
+        """Hide and destroy the tooltip window."""
+        tw = self.tipwindow
+        self.tipwindow = None
+        if tw:
+            tw.destroy()
 
 
 @dataclass
@@ -974,6 +1046,10 @@ class TradeJournalApp:
         # Chart-related state
         self.current_chart_symbol: Optional[str] = None
         self.chart_canvas = None
+        # Treeview tooltip state
+        self._tree_tooltip_win = None
+        self._tree_tooltip_label = None
+        self._tree_tooltip_last = (None, None, None)  # (item_id, col_name, text)
         # Load persisted data (if available)
         self.load_persisted_data()
         # Register handler to save on close
@@ -1074,14 +1150,14 @@ class TradeJournalApp:
         # Row 3: Strategy filters, clear filters and toggle table buttons
         ttk.Label(top_frame, text="Filter Entry:").grid(row=3, column=0, padx=(0, 2), pady=2, sticky="e")
         self.entry_strategy_filter_var = tk.StringVar(value="all")
-        self.entry_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.entry_strategy_filter_var, width=15)
+        self.entry_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.entry_strategy_filter_var, width=50)
         self.entry_strategy_filter_combo.grid(row=3, column=1, padx=(0, 5), pady=2)
         self.entry_strategy_filter_combo.bind("<<ComboboxSelected>>", self.on_strategy_filter_change)
         self.entry_strategy_filter_combo.bind("<KeyRelease>", self.on_strategy_filter_change)
 
         ttk.Label(top_frame, text="Filter Exit:").grid(row=3, column=2, padx=(0, 2), pady=2, sticky="e")
         self.exit_strategy_filter_var = tk.StringVar(value="all")
-        self.exit_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.exit_strategy_filter_var, width=15)
+        self.exit_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.exit_strategy_filter_var, width=50)
         self.exit_strategy_filter_combo.grid(row=3, column=3, padx=(0, 5), pady=2)
         self.exit_strategy_filter_combo.bind("<<ComboboxSelected>>", self.on_strategy_filter_change)
         self.exit_strategy_filter_combo.bind("<KeyRelease>", self.on_strategy_filter_change)
@@ -2187,12 +2263,14 @@ class TradeJournalApp:
         self.group_id_to_indices.clear()
         
         # Populate strategy filter dropdowns with unique values from trades
-        # Split comma-separated strategies into individual options
+        # Split strategies on commas, carriage returns, semicolons, and tabs
         def extract_individual_strategies(strategy_str: str) -> set:
-            """Extract individual strategies from comma-separated string."""
+            """Extract individual strategies from string with multiple delimiters (comma, CR, semicolon, tab)."""
             if not strategy_str:
                 return set()
-            return {s.strip() for s in strategy_str.split(',') if s.strip()}
+            # Split on comma, carriage return (\r), newline (\n), semicolon, and tab
+            strategies = re.split(r'[,\r\n;\t]+', strategy_str)
+            return {s.strip() for s in strategies if s.strip()}
         
         entry_strategies = set()
         exit_strategies = set()
@@ -2220,10 +2298,12 @@ class TradeJournalApp:
 
         # Helper to determine if a trade should be shown based on filters
         def parse_strategies(strategy_str: str) -> list:
-            """Parse comma-separated strategies into a list, trimmed and lowercased."""
+            """Parse strategies with multiple delimiters (comma, CR, semicolon, tab) into a list, trimmed and lowercased."""
             if not strategy_str:
                 return []
-            return [s.strip().lower() for s in strategy_str.split(',') if s.strip()]
+            # Split on comma, carriage return (\r), newline (\n), semicolon, and tab
+            strategies = re.split(r'[,\r\n;\t]+', strategy_str)
+            return [s.strip().lower() for s in strategies if s.strip()]
         
         def trade_visible(index: int, trade: TradeEntry) -> bool:
             # Apply top filter set if present
@@ -2428,6 +2508,8 @@ class TradeJournalApp:
                     note_str = self.model.notes.get(key, "")
                     entry_strategy_str = self.model.entry_strategies.get(key, "")
                     exit_strategy_str = self.model.exit_strategies.get(key, "")
+                    entry_strategy_display = format_strategy_for_table(entry_strategy_str)
+                    exit_strategy_display = format_strategy_for_table(exit_strategy_str)
                     row = (
                         t.account_number,
                         t.symbol,
@@ -2440,8 +2522,8 @@ class TradeJournalApp:
                         f"{t.pnl_pct:.2f}%" if t.pnl_pct is not None else "",
                         str(t.hold_period) if t.hold_period is not None else "",
                         screen_indicator,
-                        entry_strategy_str,
-                        exit_strategy_str,
+                        entry_strategy_display,
+                        exit_strategy_display,
                         note_str,
                     )
                     # Use the numeric index as iid for child to allow mapping notes back
@@ -2493,6 +2575,8 @@ class TradeJournalApp:
                 note_str = self.model.notes.get(key, "")
                 entry_strategy_str = self.model.entry_strategies.get(key, "")
                 exit_strategy_str = self.model.exit_strategies.get(key, "")
+                entry_strategy_display = format_strategy_for_table(entry_strategy_str)
+                exit_strategy_display = format_strategy_for_table(exit_strategy_str)
                 row = (
                     trade.account_number,
                     trade.symbol,
@@ -2505,8 +2589,8 @@ class TradeJournalApp:
                     f"{trade.pnl_pct:.2f}%" if trade.pnl_pct is not None else "",
                     str(trade.hold_period) if trade.hold_period is not None else "",
                     screen_indicator,
-                    entry_strategy_str,
-                    exit_strategy_str,
+                    entry_strategy_display,
+                    exit_strategy_display,
                     note_str,
                 )
                 row_id = str(idx)
@@ -2515,6 +2599,111 @@ class TradeJournalApp:
         
         # Auto-fit columns to content
         self.autofit_columns()
+        
+        # Bind tooltip functionality for strategy columns
+        self.setup_tree_tooltips()
+
+    def setup_tree_tooltips(self) -> None:
+        """Setup motion-based tooltips for entry and exit strategy columns in the tree."""
+        # Bind fresh (avoid stacking multiple bindings across repaints)
+        self.tree.unbind("<Motion>")
+        self.tree.unbind("<Leave>")
+        self.tree.bind("<Motion>", self.on_tree_motion)
+        self.tree.bind("<Leave>", self.on_tree_leave)
+
+    def _hide_tree_tooltip(self) -> None:
+        if self._tree_tooltip_win is not None:
+            try:
+                self._tree_tooltip_win.destroy()
+            except Exception:
+                pass
+        self._tree_tooltip_win = None
+        self._tree_tooltip_label = None
+        self._tree_tooltip_last = (None, None, None)
+
+    def _show_tree_tooltip(self, text: str, x_root: int, y_root: int) -> None:
+        if not text:
+            self._hide_tree_tooltip()
+            return
+        if self._tree_tooltip_win is None:
+            win = tk.Toplevel(self.root)
+            win.wm_overrideredirect(True)
+            label = tk.Label(
+                win,
+                text=text,
+                background="#ffffe0",
+                relief=tk.SOLID,
+                borderwidth=1,
+                font=("TkDefaultFont", 9),
+                justify=tk.LEFT,
+                anchor="w",
+            )
+            label.pack(ipadx=6, ipady=3)
+            self._tree_tooltip_win = win
+            self._tree_tooltip_label = label
+        else:
+            # Update text if it changed
+            if self._tree_tooltip_label is not None:
+                self._tree_tooltip_label.configure(text=text)
+        self._tree_tooltip_win.wm_geometry(f"+{x_root}+{y_root}")
+    
+    def on_tree_motion(self, event: tk.Event) -> None:
+        """Show tooltip when hovering over entry/exit strategy cells."""
+        try:
+            # Only show tooltips over data cells (not headings/separators)
+            region = self.tree.identify_region(event.x, event.y)
+            if region != "cell":
+                self._hide_tree_tooltip()
+                return
+
+            item_id = self.tree.identify_row(event.y)
+            col_id = self.tree.identify_column(event.x)  # '#1'..'#N' for data columns
+            if not item_id or not col_id or col_id == "#0":
+                self._hide_tree_tooltip()
+                return
+
+            try:
+                col_index = int(col_id[1:]) - 1
+            except Exception:
+                self._hide_tree_tooltip()
+                return
+
+            columns = list(self.tree["columns"])  # data columns only
+            if col_index < 0 or col_index >= len(columns):
+                self._hide_tree_tooltip()
+                return
+
+            col_name = columns[col_index]
+            if col_name not in {"entry_strategy", "exit_strategy"}:
+                self._hide_tree_tooltip()
+                return
+
+            cell_text = str(self.tree.set(item_id, col_name) or "")
+            if not cell_text:
+                self._hide_tree_tooltip()
+                return
+
+            # Always show for populated cells; format multi-strategy text as one-per-line.
+            tooltip_lines = [p.strip() for p in re.split(r"[,\r\n;\t]+", cell_text) if p.strip()]
+            tooltip_text = "\n".join(tooltip_lines) if tooltip_lines else cell_text.strip()
+            if not tooltip_text:
+                self._hide_tree_tooltip()
+                return
+
+            last_item, last_col, last_text = self._tree_tooltip_last
+            if (item_id, col_name, tooltip_text) != (last_item, last_col, last_text):
+                self._tree_tooltip_last = (item_id, col_name, tooltip_text)
+                self._show_tree_tooltip(tooltip_text, event.x_root + 12, event.y_root + 12)
+            else:
+                # Just move the tooltip with the mouse
+                if self._tree_tooltip_win is not None:
+                    self._tree_tooltip_win.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        except Exception:
+            self._hide_tree_tooltip()
+    
+    def on_tree_leave(self, event: tk.Event = None) -> None:
+        """Hide tooltip when mouse leaves the tree."""
+        self._hide_tree_tooltip()
 
     def on_tree_select(self, event: tk.Event) -> None:
         """Handle selection of a treeview item to load its note."""
@@ -2539,7 +2728,8 @@ class TradeJournalApp:
             if ss_list and len(ss_list) > 0:
                 self.screenshot_var.set(f"{len(ss_list)} screenshot(s)")
                 # Try to load preview of first screenshot
-                self._update_screenshot_preview(ss_list[0]["filepath"])
+                resolved_path = self._resolve_screenshot_path(ss_list[0]["filepath"])
+                self._update_screenshot_preview(resolved_path)
             else:
                 self.screenshot_var.set("(none)")
                 # Explicitly clear the preview image to prevent persistence
@@ -2609,6 +2799,39 @@ class TradeJournalApp:
         # Refresh the table to show all updates
         self.populate_table()
 
+    def _resolve_screenshot_path(self, filepath: str) -> str:
+        """Resolve a screenshot filepath (relative or absolute) to absolute path.
+        
+        If the path is relative, resolve it relative to the journal directory.
+        If it's absolute and doesn't exist, try to resolve it as-is.
+        """
+        # If path is absolute and exists, use it
+        if os.path.isabs(filepath) and os.path.exists(filepath):
+            return filepath
+        
+        # Try relative to journal directory
+        journal_dir = os.path.dirname(os.path.abspath(self.root.winfo_script() or __file__))
+        rel_path = os.path.join(journal_dir, filepath)
+        if os.path.exists(rel_path):
+            return rel_path
+        
+        # Fall back to original (may not exist, but let the caller handle the error)
+        return filepath
+    
+    def _make_screenshot_path_relative(self, filepath: str) -> str:
+        """Convert an absolute screenshot path to relative (relative to journal directory)."""
+        try:
+            journal_dir = os.path.dirname(os.path.abspath(self.persist_path))
+            # Try to make it relative
+            rel_path = os.path.relpath(filepath, journal_dir)
+            # If the relative path uses .., it means the file is outside the journal dir
+            # In that case, keep it absolute for now (user can organize later)
+            if not rel_path.startswith(".."):
+                return rel_path
+        except (ValueError, TypeError):
+            pass
+        return filepath
+    
     def add_screenshot(self) -> None:
         """Add a screenshot file to the selected trade with an optional label."""
         selected = self.tree.selection()
@@ -2639,11 +2862,14 @@ class TradeJournalApp:
         if key not in self.model.screenshots:
             self.model.screenshots[key] = []
         
+        # Store path as relative if possible (for portability across machines)
+        stored_path = self._make_screenshot_path_relative(filepath)
+        
         # Create screenshot entry with filepath and label
-        screenshot_entry = {"filepath": filepath, "label": label if label else os.path.basename(filepath)}
+        screenshot_entry = {"filepath": stored_path, "label": label if label else os.path.basename(filepath)}
         
         # Check if this file is already attached
-        if not any(s["filepath"] == filepath for s in self.model.screenshots[key]):
+        if not any(s["filepath"] == stored_path for s in self.model.screenshots[key]):
             self.model.screenshots[key].append(screenshot_entry)
         
         # Update screenshot display
@@ -2651,19 +2877,23 @@ class TradeJournalApp:
         self.screenshot_var.set(f"{num_screenshots} screenshot(s)")
         # Load preview of the first screenshot
         if self.model.screenshots[key]:
-            self._update_screenshot_preview(self.model.screenshots[key][0]["filepath"])
+            resolved_path = self._resolve_screenshot_path(self.model.screenshots[key][0]["filepath"])
+            self._update_screenshot_preview(resolved_path)
     
     def _update_screenshot_preview(self, filepath: str) -> None:
         """Load and display a preview of the given screenshot."""
+        # Resolve the filepath (handles relative paths)
+        resolved_path = self._resolve_screenshot_path(filepath)
+        
         photo = None
         try:
             from PIL import Image, ImageTk  # type: ignore
-            img = Image.open(filepath)
+            img = Image.open(resolved_path)
             img.thumbnail((200, 200))
             photo = ImageTk.PhotoImage(img)
         except Exception:
             try:
-                photo = tk.PhotoImage(file=filepath)
+                photo = tk.PhotoImage(file=resolved_path)
             except Exception:
                 photo = None
         if photo:
@@ -2706,11 +2936,12 @@ class TradeJournalApp:
             """Update the displayed image and label."""
             screenshot_data = screenshots[current_index[0]]
             filepath = screenshot_data["filepath"]
+            resolved_path = self._resolve_screenshot_path(filepath)
             label = screenshot_data.get("label", "")
             
             try:
                 from PIL import Image, ImageTk  # type: ignore
-                img = Image.open(filepath)
+                img = Image.open(resolved_path)
                 # Scale to fit window while maintaining aspect ratio
                 img.thumbnail((850, 500))
                 photo = ImageTk.PhotoImage(img)
