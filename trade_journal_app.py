@@ -645,6 +645,10 @@ class TradeJournalModel:
             self.entry_strategies = data.get('entry_strategies', {})
             self.exit_strategies = data.get('exit_strategies', {})
             self.seen_tx_keys = data.get('seen_tx_keys', set())
+            
+            # Migrate old screenshot format (string) to new format (list of dicts)
+            self._migrate_screenshots_format()
+            
             # Reset buy id counter and re-match trades
             self.next_buy_id = 0
             self._match_trades()
@@ -653,6 +657,21 @@ class TradeJournalModel:
             # If loading fails, silently ignore and start fresh
             self.clear()
             return {}
+    
+    def _migrate_screenshots_format(self) -> None:
+        """Convert old screenshot format (string paths) to new format (list of dicts with labels)."""
+        migrated = {}
+        for key, value in self.screenshots.items():
+            if isinstance(value, str):
+                # Old format: single string path -> new format: list with one dict
+                migrated[key] = [{"filepath": value, "label": os.path.basename(value)}]
+            elif isinstance(value, list) and value and isinstance(value[0], str):
+                # Old format: list of strings -> new format: list of dicts
+                migrated[key] = [{"filepath": fp, "label": os.path.basename(fp)} for fp in value]
+            else:
+                # Already new format or empty
+                migrated[key] = value if isinstance(value, list) else []
+        self.screenshots = migrated
 
     def compute_key(self, trade: TradeEntry) -> tuple:
         """Compute a stable unique key for a trade entry to map notes and attachments.
@@ -2523,12 +2542,16 @@ class TradeJournalApp:
                 self._update_screenshot_preview(ss_list[0]["filepath"])
             else:
                 self.screenshot_var.set("(none)")
+                # Explicitly clear the preview image to prevent persistence
                 self.screenshot_preview_label.configure(image="")
                 self.screenshot_preview_label.image = None
         else:
             # Aggregated or unknown row selected
             self.note_text.delete("1.0", tk.END)
-            self.screenshot_var.set("")
+            self.entry_strategy_text.delete("1.0", tk.END)
+            self.exit_strategy_text.delete("1.0", tk.END)
+            self.screenshot_var.set("(none)")
+            # Explicitly clear the preview image to prevent persistence
             self.screenshot_preview_label.configure(image="")
             self.screenshot_preview_label.image = None
     
