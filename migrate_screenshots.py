@@ -4,13 +4,13 @@ Screenshot Migration Tool
 =========================
 
 This script helps migrate screenshots from absolute paths (especially macOS paths)
-to relative paths or to a portable screenshots folder.
+to relative paths or to a portable Chart_Screenshots folder.
 
 Usage:
 1. Run this script in the same directory as your journal_state.pkl
 2. Choose to either:
    - Convert paths to relative (works if images are in accessible locations)
-   - Copy images to a portable 'screenshots' folder within the journal directory
+   - Copy images to a portable 'Chart_Screenshots' folder within the journal directory
 """
 
 import os
@@ -18,6 +18,10 @@ import sys
 import shutil
 import pickle
 from pathlib import Path
+
+# Import Transaction class so pickle can deserialize it
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from trade_journal_app import Transaction
 
 def load_state(filepath: str) -> dict:
     """Load the journal state from pickle file."""
@@ -73,15 +77,15 @@ def migrate_to_relative(data: dict, journal_dir: str) -> dict:
     return data
 
 def migrate_to_screenshots_folder(data: dict, journal_dir: str) -> dict:
-    """Copy screenshot images to a portable 'screenshots' folder and update paths."""
+    """Copy screenshot images to a portable 'Chart_Screenshots' folder and update paths."""
     if 'screenshots' not in data:
         print("No screenshots found in journal state")
         return data
     
-    # Create screenshots folder
-    ss_folder = os.path.join(journal_dir, 'screenshots')
+    # Create Chart_Screenshots folder
+    ss_folder = os.path.join(journal_dir, 'Chart_Screenshots')
     os.makedirs(ss_folder, exist_ok=True)
-    print(f"Created/verified screenshots folder: {ss_folder}")
+    print(f"Created/verified Chart_Screenshots folder: {ss_folder}")
     
     screenshots = data['screenshots']
     migrated_count = 0
