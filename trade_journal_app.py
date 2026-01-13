@@ -451,8 +451,8 @@ class TradeJournalModel:
         self.notes: Dict[tuple, str] = {}
         # Counter for assigning unique IDs to buys
         self.next_buy_id: int = 0
-        # Screenshots keyed by unique trade key (path to image)
-        self.screenshots: Dict[tuple, str] = {}
+        # Screenshots keyed by unique trade key (list of image paths for multiple screenshots)
+        self.screenshots: Dict[tuple, List[str]] = {}
         # Set of unique transaction keys to detect duplicates across sessions
         # Each key is a tuple of (run_date, account_number, symbol, quantity, price, amount)
         self.seen_tx_keys: set = set()
@@ -1155,6 +1155,8 @@ class TradeJournalApp:
         self.table_frame.rowconfigure(0, weight=1)
         # Bind selection
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        # Bind double-click on screenshot column to view screenshots
+        self.tree.bind("<Double-Button-1>", self.on_tree_double_click)
 
         # RIGHT PANE: Notes and summary panel with scrollbar (spans full height)
         right_frame = ttk.Frame(main_paned)
@@ -1236,11 +1238,14 @@ class TradeJournalApp:
         # Button to add screenshot
         add_ss_btn = ttk.Button(right_scrollable_frame, text="Add Screenshot", command=self.add_screenshot)
         add_ss_btn.pack(anchor="w", pady=(5, 0))
-        # Button to remove screenshot
-        remove_ss_btn = ttk.Button(right_scrollable_frame, text="Remove Screenshot", command=self.remove_screenshot)
+        # Button to view screenshots in a zoomed window
+        view_ss_btn = ttk.Button(right_scrollable_frame, text="View Screenshots", command=self.view_screenshots)
+        view_ss_btn.pack(anchor="w", pady=(0, 2))
+        # Button to remove all screenshots
+        remove_ss_btn = ttk.Button(right_scrollable_frame, text="Remove Screenshots", command=self.remove_screenshot)
         remove_ss_btn.pack(anchor="w", pady=(0, 5))
-        # Label to display screenshot filename (or indicator)
-        ttk.Label(right_scrollable_frame, text="Screenshot:").pack(anchor="w", pady=(10, 0))
+        # Label to display screenshot count
+        ttk.Label(right_scrollable_frame, text="Screenshots:").pack(anchor="w", pady=(10, 0))
         self.screenshot_var = tk.StringVar(value="")
         self.screenshot_label = ttk.Label(right_scrollable_frame, textvariable=self.screenshot_var, foreground="blue")
         self.screenshot_label.pack(anchor="w")
@@ -2503,7 +2508,7 @@ class TradeJournalApp:
         # Determine if this row corresponds to a trade
         key = self.id_to_key.get(item_id)
         if key is not None:
-            # Load note, strategies, and screenshot for this trade
+            # Load note, strategies, and screenshots for this trade
             note = self.model.notes.get(key, "")
             self.note_text.delete("1.0", tk.END)
             self.note_text.insert(tk.END, note)
@@ -2513,30 +2518,11 @@ class TradeJournalApp:
             exit_strategy = self.model.exit_strategies.get(key, "")
             self.exit_strategy_text.delete("1.0", tk.END)
             self.exit_strategy_text.insert(tk.END, exit_strategy)
-            ss_path = self.model.screenshots.get(key)
-            if ss_path:
-                self.screenshot_var.set(os.path.basename(ss_path))
-                # Try to load image preview
-                photo = None
-                try:
-                    from PIL import Image, ImageTk  # type: ignore
-                    img = Image.open(ss_path)
-                    # Resize to fit preview area
-                    img.thumbnail((200, 200))
-                    photo = ImageTk.PhotoImage(img)
-                except Exception:
-                    # Fallback: try Tkinter PhotoImage directly
-                    try:
-                        photo = tk.PhotoImage(file=ss_path)
-                    except Exception:
-                        photo = None
-                if photo:
-                    self.screenshot_preview_label.configure(image=photo)
-                    self.screenshot_preview_label.image = photo
-                else:
-                    # Clear image preview if cannot load
-                    self.screenshot_preview_label.configure(image="")
-                    self.screenshot_preview_label.image = None
+            ss_list = self.model.screenshots.get(key)
+            if ss_list and len(ss_list) > 0:
+                self.screenshot_var.set(f"{len(ss_list)} screenshot(s)")
+                # Try to load preview of first screenshot
+                self._update_screenshot_preview(ss_list[0])
             else:
                 self.screenshot_var.set("(none)")
                 self.screenshot_preview_label.configure(image="")
@@ -2547,6 +2533,28 @@ class TradeJournalApp:
             self.screenshot_var.set("")
             self.screenshot_preview_label.configure(image="")
             self.screenshot_preview_label.image = None
+    
+    def on_tree_double_click(self, event: tk.Event) -> None:
+        """Handle double-click on tree item to view screenshots if clicked on screenshot column."""
+        item_id = self.tree.identify("item", event.x, event.y)
+        column = self.tree.identify("column", event.x, event.y)
+        
+        if not item_id or not column:
+            return
+        
+        # Check if clicked on screenshot column (column #11)
+        # The columns are: account(#1), symbol(#2), entry_date(#3), entry_price(#4), 
+        # exit_date(#5), exit_price(#6), quantity(#7), pnl(#8), pnl_pct(#9), hold_period(#10),
+        # screenshot(#11), entry_strategy(#12), exit_strategy(#13), note(#14)
+        if column != "#11":
+            return
+        
+        key = self.id_to_key.get(item_id)
+        if key is None:
+            return
+        
+        if key in self.model.screenshots and self.model.screenshots[key]:
+            self.view_screenshots()
 
     def save_note(self) -> None:
         """Save the note and strategies for the selected trade entry."""
@@ -2581,7 +2589,7 @@ class TradeJournalApp:
         self.populate_table()
 
     def add_screenshot(self) -> None:
-        """Associate a screenshot file with the selected trade."""
+        """Add a screenshot file to the selected trade (supports multiple screenshots)."""
         selected = self.tree.selection()
         if not selected:
             messagebox.showinfo("No Selection", "Please select a trade to attach a screenshot.")
@@ -2599,11 +2607,20 @@ class TradeJournalApp:
         filepath = filedialog.askopenfilename(title="Select Image", filetypes=filetypes)
         if not filepath:
             return
-        # Associate screenshot path with trade key
-        self.model.screenshots[key] = filepath
-        # Update screenshot display and preview
-        self.screenshot_var.set(os.path.basename(filepath))
-        # Load preview
+        # Add screenshot to list (initialize if needed)
+        if key not in self.model.screenshots:
+            self.model.screenshots[key] = []
+        if filepath not in self.model.screenshots[key]:
+            self.model.screenshots[key].append(filepath)
+        # Update screenshot display
+        num_screenshots = len(self.model.screenshots[key])
+        self.screenshot_var.set(f"{num_screenshots} screenshot(s)")
+        # Load preview of the first screenshot
+        if self.model.screenshots[key]:
+            self._update_screenshot_preview(self.model.screenshots[key][0])
+    
+    def _update_screenshot_preview(self, filepath: str) -> None:
+        """Load and display a preview of the given screenshot."""
         photo = None
         try:
             from PIL import Image, ImageTk  # type: ignore
@@ -2622,6 +2639,77 @@ class TradeJournalApp:
             self.screenshot_preview_label.configure(image="")
             self.screenshot_preview_label.image = None
 
+    def view_screenshots(self) -> None:
+        """Open a window showing all screenshots for the selected trade."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("No Selection", "Please select a trade to view its screenshots.")
+            return
+        item_id = selected[0]
+        key = self.id_to_key.get(item_id)
+        if key is None:
+            messagebox.showinfo("Invalid Selection", "Please select an individual trade (not a grouped row).")
+            return
+        if key not in self.model.screenshots or not self.model.screenshots[key]:
+            messagebox.showinfo("No Screenshots", "This trade has no attached screenshots.")
+            return
+        
+        # Create a new window
+        ss_window = tk.Toplevel(self.root)
+        ss_window.title("Screenshots")
+        ss_window.geometry("800x600")
+        
+        screenshots = self.model.screenshots[key]
+        
+        # Create a frame for navigation buttons and image display
+        nav_frame = ttk.Frame(ss_window)
+        nav_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Track current screenshot index
+        current_index = [0]
+        
+        def update_image():
+            """Update the displayed image."""
+            filepath = screenshots[current_index[0]]
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+                img = Image.open(filepath)
+                # Scale to fit window while maintaining aspect ratio
+                img.thumbnail((750, 500))
+                photo = ImageTk.PhotoImage(img)
+                img_label.configure(image=photo)
+                img_label.image = photo
+                counter_label.config(text=f"Screenshot {current_index[0] + 1} of {len(screenshots)}")
+            except Exception as e:
+                img_label.configure(text=f"Could not load image: {e}")
+        
+        def prev_image():
+            if current_index[0] > 0:
+                current_index[0] -= 1
+                update_image()
+        
+        def next_image():
+            if current_index[0] < len(screenshots) - 1:
+                current_index[0] += 1
+                update_image()
+        
+        # Navigation buttons
+        prev_btn = ttk.Button(nav_frame, text="← Previous", command=prev_image)
+        prev_btn.pack(side=tk.LEFT, padx=5)
+        
+        counter_label = ttk.Label(nav_frame, text="")
+        counter_label.pack(side=tk.LEFT, padx=20)
+        
+        next_btn = ttk.Button(nav_frame, text="Next →", command=next_image)
+        next_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Image label
+        img_label = ttk.Label(ss_window)
+        img_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Display first image
+        update_image()
+    
     def view_internal_chart(self) -> None:
         """Switch to Charts tab, download data, and display chart for the selected trade's symbol."""
         selected = self.tree.selection()
@@ -2706,27 +2794,27 @@ class TradeJournalApp:
         self.view_tradingview_chart()
 
     def remove_screenshot(self) -> None:
-        """Remove the screenshot associated with the selected trade (if any).
+        """Remove all screenshots associated with the selected trade (if any).
 
-        This method detaches any previously attached image from the selected trade
+        This method detaches all previously attached images from the selected trade
         and updates the table indicator and preview accordingly. If the selected
-        row is a grouped summary or no screenshot exists, an informational
+        row is a grouped summary or no screenshots exist, an informational
         message is shown.
         """
         selected = self.tree.selection()
         if not selected:
-            messagebox.showinfo("No Selection", "Please select a trade to remove a screenshot.")
+            messagebox.showinfo("No Selection", "Please select a trade to remove screenshots.")
             return
         item_id = selected[0]
         key = self.id_to_key.get(item_id)
         if key is None:
             messagebox.showinfo("Invalid Selection", "Please select an individual trade (not a grouped row).")
             return
-        # If no screenshot attached, notify user
-        if key not in self.model.screenshots:
-            messagebox.showinfo("No Screenshot", "No screenshot is attached to this trade.")
+        # If no screenshots attached, notify user
+        if key not in self.model.screenshots or not self.model.screenshots[key]:
+            messagebox.showinfo("No Screenshots", "No screenshots are attached to this trade.")
             return
-        # Remove screenshot entry
+        # Remove all screenshots for this trade
         try:
             del self.model.screenshots[key]
         except Exception:
@@ -2738,9 +2826,9 @@ class TradeJournalApp:
         # Update screenshot indicator in the table for this row
         try:
             current_values = list(self.tree.item(item_id, "values"))
-            # The screenshot column is at index 9 of the values tuple
-            if len(current_values) > 9:
-                current_values[9] = ""
+            # The screenshot column is at index 10 of the values tuple
+            if len(current_values) > 10:
+                current_values[10] = ""
                 self.tree.item(item_id, values=current_values)
         except Exception:
             # If direct update fails (e.g. in grouped view), re-populate the table
