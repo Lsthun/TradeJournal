@@ -2931,10 +2931,12 @@ class TradeJournalApp:
                 resolved_path = self._resolve_screenshot_path(self.model.screenshots[key][0]["filepath"])
                 self._update_screenshot_preview(resolved_path)
             
-            # Update notes display if this trade is currently selected
-            if item_id in self.tree.selection():
-                self.note_text.delete("1.0", tk.END)
-                self.note_text.insert(tk.END, notes)
+            # Refresh the main display to show updated notes and everything
+            # If this trade is still selected, reload all its data
+            current_selection = self.tree.selection()
+            if current_selection and item_id in current_selection:
+                # Trigger the on_tree_select logic to refresh all displays
+                self.on_tree_select(None)
             
             preview_win.destroy()
         
