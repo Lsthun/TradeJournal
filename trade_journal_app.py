@@ -2833,7 +2833,7 @@ class TradeJournalApp:
         return filepath
     
     def add_screenshot(self) -> None:
-        """Add a screenshot file to the selected trade with an optional label."""
+        """Add a screenshot file to the selected trade with optional label and notes."""
         selected = self.tree.selection()
         if not selected:
             messagebox.showinfo("No Selection", "Please select a trade to attach a screenshot.")
@@ -2852,17 +2852,17 @@ class TradeJournalApp:
         if not filepath:
             return
         
-        # Show preview dialog with image and label input
+        # Show preview dialog with image, label, and notes
         preview_win = tk.Toplevel(self.root)
-        preview_win.title("Screenshot Preview")
-        preview_win.geometry("500x600")
+        preview_win.title("Screenshot Preview & Trade Notes")
+        preview_win.geometry("600x800")
         
         # Load and display the image
         photo = None
         try:
             from PIL import Image, ImageTk  # type: ignore
             img = Image.open(filepath)
-            img.thumbnail((450, 400))
+            img.thumbnail((450, 300))
             photo = ImageTk.PhotoImage(img)
         except Exception:
             try:
@@ -2878,20 +2878,32 @@ class TradeJournalApp:
             error_label = tk.Label(preview_win, text="Could not load image preview", fg="red")
             error_label.pack(pady=10)
         
-        # Label input frame
-        label_frame = ttk.Frame(preview_win)
-        label_frame.pack(fill=tk.X, padx=10, pady=10)
+        # Screenshot label input frame
+        label_frame = ttk.LabelFrame(preview_win, text="Screenshot Label (optional)")
+        label_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
         
-        ttk.Label(label_frame, text="Label (optional):").pack(anchor="w")
-        label_entry = tk.Text(label_frame, height=3, width=50)
-        label_entry.pack(fill=tk.BOTH, expand=True, pady=(5, 10))
+        label_entry = tk.Text(label_frame, height=2, width=60)
+        label_entry.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Trade notes frame
+        notes_frame = ttk.LabelFrame(preview_win, text="Trade Notes (optional)")
+        notes_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        notes_entry = tk.Text(notes_frame, height=6, width=60)
+        notes_entry.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Load existing notes if any
+        existing_notes = self.model.notes.get(key, "")
+        if existing_notes:
+            notes_entry.insert("1.0", existing_notes)
         
         # Buttons
         button_frame = ttk.Frame(preview_win)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        def add_it():
+        def add_and_save():
             label = label_entry.get("1.0", tk.END).strip()
+            notes = notes_entry.get("1.0", tk.END).strip()
             
             # Add screenshot to list (initialize if needed)
             if key not in self.model.screenshots:
@@ -2907,6 +2919,10 @@ class TradeJournalApp:
             if not any(s["filepath"] == stored_path for s in self.model.screenshots[key]):
                 self.model.screenshots[key].append(screenshot_entry)
             
+            # Save notes if provided
+            if notes:
+                self.model.notes[key] = notes
+            
             # Update screenshot display
             num_screenshots = len(self.model.screenshots[key])
             self.screenshot_var.set(f"{num_screenshots} screenshot(s)")
@@ -2915,12 +2931,17 @@ class TradeJournalApp:
                 resolved_path = self._resolve_screenshot_path(self.model.screenshots[key][0]["filepath"])
                 self._update_screenshot_preview(resolved_path)
             
+            # Update notes display if this trade is currently selected
+            if item_id in self.tree.selection():
+                self.note_text.delete("1.0", tk.END)
+                self.note_text.insert(tk.END, notes)
+            
             preview_win.destroy()
         
         def cancel_it():
             preview_win.destroy()
         
-        ttk.Button(button_frame, text="Add Screenshot", command=add_it).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Add Screenshot & Save Notes", command=add_and_save).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel_it).pack(side=tk.LEFT, padx=5)
     
     def _update_screenshot_preview(self, filepath: str) -> None:
