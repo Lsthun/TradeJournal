@@ -2164,6 +2164,13 @@ class TradeJournalApp:
         self.group_id_to_indices.clear()
         
         # Populate strategy filter dropdowns with unique values from trades
+        # Split comma-separated strategies into individual options
+        def extract_individual_strategies(strategy_str: str) -> set:
+            """Extract individual strategies from comma-separated string."""
+            if not strategy_str:
+                return set()
+            return {s.strip() for s in strategy_str.split(',') if s.strip()}
+        
         entry_strategies = set()
         exit_strategies = set()
         for idx, trade in enumerate(self.model.trades):
@@ -2171,9 +2178,9 @@ class TradeJournalApp:
             entry_strat = self.model.entry_strategies.get(key, "")
             exit_strat = self.model.exit_strategies.get(key, "")
             if entry_strat:
-                entry_strategies.add(entry_strat)
+                entry_strategies.update(extract_individual_strategies(entry_strat))
             if exit_strat:
-                exit_strategies.add(exit_strat)
+                exit_strategies.update(extract_individual_strategies(exit_strat))
         
         # Update combo box values
         self.entry_strategy_filter_combo['values'] = ["all"] + sorted(list(entry_strategies))
