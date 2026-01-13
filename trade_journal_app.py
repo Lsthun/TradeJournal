@@ -2809,8 +2809,8 @@ class TradeJournalApp:
         if os.path.isabs(filepath) and os.path.exists(filepath):
             return filepath
         
-        # Try relative to journal directory
-        journal_dir = os.path.dirname(os.path.abspath(self.root.winfo_script() or __file__))
+        # Try relative to journal directory (using persist_path as reference)
+        journal_dir = os.path.dirname(os.path.abspath(self.persist_path))
         rel_path = os.path.join(journal_dir, filepath)
         if os.path.exists(rel_path):
             return rel_path
