@@ -2730,6 +2730,16 @@ class TradeJournalApp:
                         current_index[0] = len(screenshots) - 1
                     update_image()
         
+        def edit_label():
+            """Edit the label of the currently displayed screenshot."""
+            current_data = screenshots[current_index[0]]
+            old_label = current_data.get("label", "")
+            new_label = simpledialog.askstring("Edit Label", "Enter new label:", initialvalue=old_label, parent=ss_window)
+            if new_label is not None:  # User didn't cancel
+                new_label = new_label.strip()
+                current_data["label"] = new_label if new_label else os.path.basename(current_data["filepath"])
+                update_image()
+        
         # Navigation buttons
         prev_btn = ttk.Button(nav_frame, text="← Previous", command=prev_image)
         prev_btn.pack(side=tk.LEFT, padx=5)
@@ -2739,6 +2749,9 @@ class TradeJournalApp:
         
         next_btn = ttk.Button(nav_frame, text="Next →", command=next_image)
         next_btn.pack(side=tk.LEFT, padx=5)
+        
+        edit_btn = ttk.Button(nav_frame, text="Edit Label", command=edit_label)
+        edit_btn.pack(side=tk.LEFT, padx=5)
         
         remove_btn = ttk.Button(nav_frame, text="Remove This", command=remove_current)
         remove_btn.pack(side=tk.LEFT, padx=5)
