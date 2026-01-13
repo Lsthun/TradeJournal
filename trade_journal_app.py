@@ -1216,11 +1216,13 @@ class TradeJournalApp:
         
         # Entry Strategy label and text
         ttk.Label(right_scrollable_frame, text="Entry Strategy:").pack(anchor="w")
+        ttk.Label(right_scrollable_frame, text="(comma-separated for multiple)", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w")
         self.entry_strategy_text = tk.Text(right_scrollable_frame, height=3, width=30)
         self.entry_strategy_text.pack(fill=tk.X, pady=(0, 5))
         
         # Exit Strategy label and text
         ttk.Label(right_scrollable_frame, text="Exit Strategy:").pack(anchor="w")
+        ttk.Label(right_scrollable_frame, text="(comma-separated for multiple)", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w")
         self.exit_strategy_text = tk.Text(right_scrollable_frame, height=3, width=30)
         self.exit_strategy_text.pack(fill=tk.X, pady=(0, 5))
         
@@ -2187,6 +2189,12 @@ class TradeJournalApp:
         descending = self.sort_descending
 
         # Helper to determine if a trade should be shown based on filters
+        def parse_strategies(strategy_str: str) -> list:
+            """Parse comma-separated strategies into a list, trimmed and lowercased."""
+            if not strategy_str:
+                return []
+            return [s.strip().lower() for s in strategy_str.split(',') if s.strip()]
+        
         def trade_visible(index: int, trade: TradeEntry) -> bool:
             # Apply top filter set if present
             if hasattr(self, 'top_filter_set') and self.top_filter_set is not None:
@@ -2195,17 +2203,21 @@ class TradeJournalApp:
             # Account filter
             if account_filter and account_filter != "all" and trade.account_number != account_filter:
                 return False
-            # Entry strategy filter (supports partial matching)
+            # Entry strategy filter (supports partial matching and multiple strategies)
             if entry_strategy_filter and entry_strategy_filter != "all":
                 key = self.model.compute_key(trade)
                 trade_entry_strategy = self.model.entry_strategies.get(key, "")
-                if entry_strategy_filter.lower() not in trade_entry_strategy.lower():
+                filter_strategies = parse_strategies(entry_strategy_filter)
+                # Check if any filter strategy is contained in the trade strategy
+                if not any(f in trade_entry_strategy.lower() for f in filter_strategies):
                     return False
-            # Exit strategy filter (supports partial matching)
+            # Exit strategy filter (supports partial matching and multiple strategies)
             if exit_strategy_filter and exit_strategy_filter != "all":
                 key = self.model.compute_key(trade)
                 trade_exit_strategy = self.model.exit_strategies.get(key, "")
-                if exit_strategy_filter.lower() not in trade_exit_strategy.lower():
+                filter_strategies = parse_strategies(exit_strategy_filter)
+                # Check if any filter strategy is contained in the trade strategy
+                if not any(f in trade_exit_strategy.lower() for f in filter_strategies):
                     return False
             # Closed-only filter
             if closed_only:
