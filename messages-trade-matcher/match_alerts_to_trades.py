@@ -17,6 +17,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from trade_journal_app import TradeJournalModel, Transaction, TradeEntry
 
+# ============================================================================
+# Configuration: Specify the alerts CSV file to match against trade journal
+# Format: "filename.csv" or path to file (e.g., "alerts_2026-01-12_17.07.csv")
+# ============================================================================
+ALERTS_CSV_FILE = "alerts.csv"  # Change this to the alerts file you want to use
+# ============================================================================
+
 
 def load_alerts(filepath: str) -> pd.DataFrame:
     """Load alerts from CSV file."""
@@ -108,7 +115,7 @@ def main():
     """Main function to match alerts to trades."""
     
     # Paths
-    alerts_csv = "alerts.csv"
+    alerts_csv = ALERTS_CSV_FILE
     journal_state = os.path.expanduser("~/Documents/journal_state.pkl")
     output_csv = "alerts_matched.csv"
     
