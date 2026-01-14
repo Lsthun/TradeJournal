@@ -963,13 +963,14 @@ class TradeJournalModel:
             self.open_qty_by_symbol[(acct_num, symbol)] = total_qty
 
     def compute_summary(self, account_filter: Optional[str] = None, *, closed_only: bool = False,
-                        start_date: Optional[dt.date] = None, end_date: Optional[dt.date] = None) -> Dict[str, float]:
+                        start_date: Optional[dt.date] = None, end_date: Optional[dt.date] = None,
+                        exit_start_date: Optional[dt.date] = None, exit_end_date: Optional[dt.date] = None) -> Dict[str, float]:
         """Compute summary statistics for trades.
 
         Filters trades by account_number (if ``account_filter`` is provided), by date range on entry_date
-        (inclusive), and optionally excludes trades whose originating buy position has not been fully closed
-        when ``closed_only`` is True. Only trades with exit_date and status==CLOSED are counted as closed trades
-        for statistics (requirement: trade = fully closed lot).
+        (inclusive) and exit_date (inclusive), and optionally excludes trades whose originating buy position
+        has not been fully closed when ``closed_only`` is True. Only trades with exit_date and status==CLOSED
+        are counted as closed trades for statistics (requirement: trade = fully closed lot).
         
         Returns:
             Dictionary with keys: total_pnl, num_trades, num_wins, num_losses, num_breakeven,
@@ -1000,6 +1001,11 @@ class TradeJournalModel:
             if start_date and trade.entry_date.date() < start_date:
                 continue
             if end_date and trade.entry_date.date() > end_date:
+                continue
+            # Date range filter on exit date (inclusive)
+            if exit_start_date and trade.exit_date and trade.exit_date.date() < exit_start_date:
+                continue
+            if exit_end_date and trade.exit_date and trade.exit_date.date() > exit_end_date:
                 continue
             # Closed-only filter: skip trades whose originating buy is still open
             if closed_only:
@@ -1065,12 +1071,13 @@ class TradeJournalModel:
         }
 
     def equity_curve(self, account_filter: Optional[str] = None, *, closed_only: bool = False,
-                     start_date: Optional[dt.date] = None, end_date: Optional[dt.date] = None) -> pd.DataFrame:
+                     start_date: Optional[dt.date] = None, end_date: Optional[dt.date] = None,
+                     exit_start_date: Optional[dt.date] = None, exit_end_date: Optional[dt.date] = None) -> pd.DataFrame:
         """Return a DataFrame representing the cumulative equity over time.
 
         Each closed trade contributes its P&L at the exit date.  Trades are filtered by account,
-        date range on entry date (inclusive), and optionally whether their originating buy position is fully
-        closed when ``closed_only`` is True. Dates outside the specified range are excluded. The DataFrame
+        date range on entry date (inclusive) and exit date (inclusive), and optionally whether their
+        originating buy position is fully closed when ``closed_only`` is True. Dates outside the specified range are excluded. The DataFrame
         contains columns 'date' and 'equity', sorted chronologically.
         """
         data: Dict[dt.date, float] = {}
@@ -1083,6 +1090,11 @@ class TradeJournalModel:
             if start_date and trade.entry_date.date() < start_date:
                 continue
             if end_date and trade.entry_date.date() > end_date:
+                continue
+            # Date range filter on exit date (inclusive)
+            if exit_start_date and trade.exit_date and trade.exit_date.date() < exit_start_date:
+                continue
+            if exit_end_date and trade.exit_date and trade.exit_date.date() > exit_end_date:
                 continue
             if closed_only:
                 if trade.buy_id < 0 or self.open_qty_by_buy_id.get(trade.buy_id, 0.0) > 1e-8:
@@ -1144,37 +1156,45 @@ class TradeJournalApp:
         # Collapse button for top controls
         self.top_controls_visible = True
         collapse_btn = ttk.Button(top_frame, text="−", width=2, command=self._toggle_top_controls)
-        collapse_btn.grid(row=0, column=0, padx=(0, 5), pady=2)
+        collapse_btn.grid(row=0, column=0, padx=(0, 5), pady=2, sticky="w")
         self.top_collapse_btn = collapse_btn
         self.top_controls_frame = top_frame
+        
+        # Make all columns expand equally to use available space
+        for i in range(8):
+            top_frame.columnconfigure(i, weight=1)
 
         # Row 0: Main action buttons
         load_btn = ttk.Button(top_frame, text="Load CSV", command=self.load_csv)
-        load_btn.grid(row=0, column=1, padx=(0, 5), pady=2)
+        load_btn.grid(row=0, column=0, padx=(0, 5), pady=2)
 
         export_btn = ttk.Button(top_frame, text="Export Journal", command=self.export_journal)
-        export_btn.grid(row=0, column=2, padx=(0, 5), pady=2)
+        export_btn.grid(row=0, column=1, padx=(0, 5), pady=2)
 
         # Button to add a manual transaction
         add_tx_btn = ttk.Button(top_frame, text="Add Transaction", command=self.add_transaction_dialog)
-        add_tx_btn.grid(row=0, column=3, padx=(0, 5), pady=2)
+        add_tx_btn.grid(row=0, column=2, padx=(0, 5), pady=2)
 
         # Button to delete selected transactions
         del_selected_btn = ttk.Button(top_frame, text="Delete Selected", command=self.delete_selected_transactions)
-        del_selected_btn.grid(row=0, column=4, padx=(0, 5), pady=2)
+        del_selected_btn.grid(row=0, column=3, padx=(0, 5), pady=2)
 
         # Button to clear the entire journal
         clear_btn = ttk.Button(top_frame, text="Clear Journal", command=self.clear_journal)
-        clear_btn.grid(row=0, column=5, padx=(0, 5), pady=2)
+        clear_btn.grid(row=0, column=4, padx=(0, 5), pady=2)
 
         # Account filter on row 0
-        ttk.Label(top_frame, text="Filter Account:").grid(row=0, column=6, padx=(5, 2), pady=2)
+        ttk.Label(top_frame, text="Filter Account:").grid(row=0, column=5, padx=(5, 2), pady=2)
         self.account_var = tk.StringVar(value="all")
         self.account_dropdown = ttk.Combobox(top_frame, textvariable=self.account_var, state="readonly", width=15)
-        self.account_dropdown.grid(row=0, column=7, padx=(0, 5), pady=2)
+        self.account_dropdown.grid(row=0, column=6, padx=(0, 5), pady=2)
         self.account_dropdown.bind("<<ComboboxSelected>>", self.on_account_filter_change)
 
-        # Row 1: Top N filter controls
+        # Row 1: Group toggle + Top N filter controls
+        self.group_var = tk.BooleanVar(value=True)
+        group_check = ttk.Checkbutton(top_frame, text="Group by symbol", variable=self.group_var, command=self.on_group_change)
+        group_check.grid(row=1, column=0, padx=(0, 4), pady=2, sticky="w")
+
         ttk.Label(top_frame, text="Top N:").grid(row=1, column=1, padx=(0, 2), pady=2, sticky="e")
         
         # Load saved settings
@@ -1200,15 +1220,10 @@ class TradeJournalApp:
         # Checkbox to show only fully closed positions
         self.closed_only_var = tk.BooleanVar(value=False)
         closed_check = ttk.Checkbutton(top_frame, text="Closed positions only", variable=self.closed_only_var, command=self.on_closed_filter_change)
-        closed_check.grid(row=1, column=7, columnspan=2, padx=(0, 5), pady=2, sticky="w")
+        closed_check.grid(row=1, column=7, padx=(0, 5), pady=2, sticky="w")
 
-        # Checkbox to group trades by symbol (collapsed parent row per closed position)
-        self.group_var = tk.BooleanVar(value=True)
-        group_check = ttk.Checkbutton(top_frame, text="Group by symbol", variable=self.group_var, command=self.on_group_change)
-        group_check.grid(row=2, column=0, columnspan=2, padx=(0, 5), pady=2, sticky="w")
-
-        # Row 2: Date filter fields
-        ttk.Label(top_frame, text="Start Date (YYYY-MM-DD):").grid(row=2, column=0, padx=(0, 2), pady=2, sticky="e")
+        # Row 2: Entry date filter fields
+        ttk.Label(top_frame, text="Entry Start (YYYY-MM-DD):").grid(row=2, column=0, padx=(0, 2), pady=2, sticky="e")
         self.start_date_var = tk.StringVar(value="")
         start_entry = ttk.Entry(top_frame, textvariable=self.start_date_var, width=12)
         # Bind a mouse click to open date picker
@@ -1217,7 +1232,7 @@ class TradeJournalApp:
         # Button to open date picker explicitly
         start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.start_date_var))
         start_pick_btn.grid(row=2, column=2, padx=(0, 5), pady=2)
-        ttk.Label(top_frame, text="End Date (YYYY-MM-DD):").grid(row=2, column=3, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="Entry End (YYYY-MM-DD):").grid(row=2, column=3, padx=(0, 2), pady=2, sticky="e")
         self.end_date_var = tk.StringVar(value="")
         end_entry = ttk.Entry(top_frame, textvariable=self.end_date_var, width=12)
         end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.end_date_var))
@@ -1227,27 +1242,50 @@ class TradeJournalApp:
         apply_date_btn = ttk.Button(top_frame, text="Apply Date Filter", command=self.apply_date_filter)
         apply_date_btn.grid(row=2, column=6, padx=(0, 5), pady=2)
 
-        # Row 3: Strategy filters, clear filters and toggle table buttons
-        ttk.Label(top_frame, text="Filter Entry:").grid(row=3, column=0, padx=(0, 2), pady=2, sticky="e")
+        # Row 3: Exit date filter fields
+        ttk.Label(top_frame, text="Exit Start (YYYY-MM-DD):").grid(row=3, column=0, padx=(0, 2), pady=2, sticky="e")
+        self.exit_start_date_var = tk.StringVar(value="")
+        exit_start_entry = ttk.Entry(top_frame, textvariable=self.exit_start_date_var, width=12)
+        exit_start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_start_date_var))
+        exit_start_entry.grid(row=3, column=1, padx=(0, 2), pady=2)
+        exit_start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_start_date_var))
+        exit_start_pick_btn.grid(row=3, column=2, padx=(0, 5), pady=2)
+        ttk.Label(top_frame, text="Exit End (YYYY-MM-DD):").grid(row=3, column=3, padx=(0, 2), pady=2, sticky="e")
+        self.exit_end_date_var = tk.StringVar(value="")
+        exit_end_entry = ttk.Entry(top_frame, textvariable=self.exit_end_date_var, width=12)
+        exit_end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_end_date_var))
+        exit_end_entry.grid(row=3, column=4, padx=(0, 2), pady=2)
+        exit_end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_end_date_var))
+        exit_end_pick_btn.grid(row=3, column=5, padx=(0, 5), pady=2)
+        # Internal parsed date holders
+        self.start_date = None
+        self.end_date = None
+        self.exit_start_date = None
+        self.exit_end_date = None
+        # Reuse the same apply button for both entry and exit date ranges
+        ttk.Button(top_frame, text="Apply Date Filter", command=self.apply_date_filter).grid(row=3, column=6, padx=(0, 5), pady=2)
+
+        # Row 4: Strategy filters, clear filters and toggle table buttons
+        ttk.Label(top_frame, text="Filter Entry:").grid(row=4, column=0, padx=(0, 2), pady=2, sticky="e")
         self.entry_strategy_filter_var = tk.StringVar(value="all")
-        self.entry_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.entry_strategy_filter_var, width=50)
-        self.entry_strategy_filter_combo.grid(row=3, column=1, padx=(0, 5), pady=2)
+        self.entry_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.entry_strategy_filter_var, width=22)
+        self.entry_strategy_filter_combo.grid(row=4, column=1, columnspan=2, padx=(0, 5), pady=2, sticky="ew")
         self.entry_strategy_filter_combo.bind("<<ComboboxSelected>>", self.on_strategy_filter_change)
         self.entry_strategy_filter_combo.bind("<KeyRelease>", self.on_strategy_filter_change)
 
-        ttk.Label(top_frame, text="Filter Exit:").grid(row=3, column=2, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="Filter Exit:").grid(row=4, column=3, padx=(0, 2), pady=2, sticky="e")
         self.exit_strategy_filter_var = tk.StringVar(value="all")
-        self.exit_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.exit_strategy_filter_var, width=50)
-        self.exit_strategy_filter_combo.grid(row=3, column=3, padx=(0, 5), pady=2)
+        self.exit_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.exit_strategy_filter_var, width=22)
+        self.exit_strategy_filter_combo.grid(row=4, column=4, columnspan=2, padx=(0, 5), pady=2, sticky="ew")
         self.exit_strategy_filter_combo.bind("<<ComboboxSelected>>", self.on_strategy_filter_change)
         self.exit_strategy_filter_combo.bind("<KeyRelease>", self.on_strategy_filter_change)
 
         clear_filter_btn = ttk.Button(top_frame, text="Clear Filters", command=self.clear_filters)
-        clear_filter_btn.grid(row=3, column=4, padx=(0, 5), pady=2, sticky="w")
+        clear_filter_btn.grid(row=4, column=6, padx=(0, 5), pady=2, sticky="w")
         
         self.table_visible = tk.BooleanVar(value=True)
         self.toggle_btn = ttk.Button(top_frame, text="Hide Table", command=self.toggle_table_visibility)
-        self.toggle_btn.grid(row=3, column=5, columnspan=2, padx=(0, 5), pady=2, sticky="w")
+        self.toggle_btn.grid(row=4, column=7, padx=(0, 5), pady=2, sticky="w")
 
         # Main frame with notebook (tabs)
         main_frame = ttk.Frame(self.root)
@@ -2423,6 +2461,15 @@ class TradeJournalApp:
                 return False
             if self.end_date and trade.entry_date.date() > self.end_date:
                 return False
+            # Date filter on exit_date (inclusive)
+            if self.exit_start_date or self.exit_end_date:
+                if not trade.exit_date:
+                    return False
+                exit_date = trade.exit_date.date()
+                if self.exit_start_date and exit_date < self.exit_start_date:
+                    return False
+                if self.exit_end_date and exit_date > self.exit_end_date:
+                    return False
             return True
 
         # If grouping by symbol, switch treeview to tree mode
@@ -2610,6 +2657,7 @@ class TradeJournalApp:
                     # Use the numeric index as iid for child to allow mapping notes back
                     row_id = str(idx)
                     self.tree.insert(group_id, "end", iid=row_id, text="", values=row)
+                    self.id_to_key[row_id] = key
         else:
             # Non-group view: show headings only (no tree column)
             self.tree.configure(show="headings")
@@ -2713,11 +2761,13 @@ class TradeJournalApp:
                 win,
                 text=text,
                 background="#ffffe0",
+                foreground="#000000",  # Force dark text for readability
                 relief=tk.SOLID,
                 borderwidth=1,
                 font=("TkDefaultFont", 9),
                 justify=tk.LEFT,
-                anchor="w",
+                anchor="nw",
+                wraplength=400,  # Wrap text at 400 pixels
             )
             label.pack(ipadx=6, ipady=3)
             self._tree_tooltip_win = win
@@ -2725,7 +2775,9 @@ class TradeJournalApp:
         else:
             # Update text if it changed
             if self._tree_tooltip_label is not None:
-                self._tree_tooltip_label.configure(text=text)
+                self._tree_tooltip_label.configure(text=text, foreground="#000000")
+        # Force geometry after text update so the window resizes correctly
+        self._tree_tooltip_win.update_idletasks()
         self._tree_tooltip_win.wm_geometry(f"+{x_root}+{y_root}")
     
     def on_tree_motion(self, event: tk.Event) -> None:
@@ -2759,14 +2811,36 @@ class TradeJournalApp:
                 self._hide_tree_tooltip()
                 return
 
-            cell_text = str(self.tree.set(item_id, col_name) or "")
-            if not cell_text:
+            # Get the key for this row from our id_to_key mapping
+            key = self.id_to_key.get(item_id)
+            
+            # Try to get the original strategy text from the model
+            strategy_text = ""
+            if key:
+                if col_name == "entry_strategy":
+                    strategy_text = self.model.entry_strategies.get(key, "")
+                else:  # exit_strategy
+                    strategy_text = self.model.exit_strategies.get(key, "")
+            
+            # If we have no strategy text, get the displayed text from the tree
+            if not strategy_text:
+                cell_text = str(self.tree.set(item_id, col_name) or "").strip()
+                strategy_text = cell_text
+            
+            # If still no text, hide tooltip
+            if not strategy_text:
                 self._hide_tree_tooltip()
                 return
-
-            # Always show for populated cells; format multi-strategy text as one-per-line.
-            tooltip_lines = [p.strip() for p in re.split(r"[,\r\n;\t]+", cell_text) if p.strip()]
-            tooltip_text = "\n".join(tooltip_lines) if tooltip_lines else cell_text.strip()
+            
+            # Format multi-strategy text as one-per-line for tooltip display
+            # Split on common delimiters (comma, CR/LF, semicolon, tab, and multiple spaces)
+            # This handles: "item1, item2" or "item1;item2" or "item1\nitem2" or "item1   item2" etc.
+            tooltip_lines = [p.strip() for p in re.split(r"[,\r\n;\t]|[ ]{2,}", strategy_text) if p.strip()]
+            if tooltip_lines:
+                tooltip_text = "\n".join(tooltip_lines)
+            else:
+                tooltip_text = strategy_text.strip()
+            
             if not tooltip_text:
                 self._hide_tree_tooltip()
                 return
@@ -2779,7 +2853,8 @@ class TradeJournalApp:
                 # Just move the tooltip with the mouse
                 if self._tree_tooltip_win is not None:
                     self._tree_tooltip_win.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-        except Exception:
+        except Exception as e:
+            # Silently ignore tooltip errors to avoid disrupting the main UI
             self._hide_tree_tooltip()
     
     def on_tree_leave(self, event: tk.Event = None) -> None:
@@ -2878,12 +2953,21 @@ class TradeJournalApp:
             self.model.exit_strategies[key] = exit_strategy
         elif key in self.model.exit_strategies:
             del self.model.exit_strategies[key]
+
+        # Refresh the visible row in the tree so changes show immediately
+        entry_display = format_strategy_for_table(entry_strategy)
+        exit_display = format_strategy_for_table(exit_strategy)
+        self.tree.set(item_id, "entry_strategy", entry_display)
+        self.tree.set(item_id, "exit_strategy", exit_display)
+        self.tree.set(item_id, "note", note)
         
         # Persist changes to disk
         self.model.save_state(self.persist_path, filter_state={
             "account_filter": self.account_var.get(),
             "start_date": self.start_date_var.get(),
             "end_date": self.end_date_var.get(),
+            "exit_start_date": self.exit_start_date_var.get(),
+            "exit_end_date": self.exit_end_date_var.get(),
             "closed_only": self.closed_only_var.get(),
             "group_by_symbol": self.group_var.get(),
             "entry_strategy_filter": self.entry_strategy_filter_var.get(),
@@ -3341,6 +3425,8 @@ class TradeJournalApp:
                 'group_by_symbol': self.group_var.get(),
                 'start_date': self.start_date_var.get(),
                 'end_date': self.end_date_var.get(),
+                'exit_start_date': self.exit_start_date_var.get(),
+                'exit_end_date': self.exit_end_date_var.get(),
             }
             self.model.save_state(self.persist_path, filter_state)
         except Exception:
@@ -3788,10 +3874,12 @@ class TradeJournalApp:
                     self.group_var.set(filter_state.get('group_by_symbol', True))
                     self.start_date_var.set(filter_state.get('start_date', ''))
                     self.end_date_var.set(filter_state.get('end_date', ''))
+                    self.exit_start_date_var.set(filter_state.get('exit_start_date', ''))
+                    self.exit_end_date_var.set(filter_state.get('exit_end_date', ''))
                     self.entry_strategy_filter_var.set(filter_state.get('entry_strategy_filter', 'all'))
                     self.exit_strategy_filter_var.set(filter_state.get('exit_strategy_filter', 'all'))
                     # Apply date filter if dates were set
-                    if filter_state.get('start_date') or filter_state.get('end_date'):
+                    if filter_state.get('start_date') or filter_state.get('end_date') or filter_state.get('exit_start_date') or filter_state.get('exit_end_date'):
                         self.apply_date_filter()
                 else:
                     self.account_dropdown.set("all")
@@ -3820,6 +3908,8 @@ class TradeJournalApp:
                 'group_by_symbol': self.group_var.get(),
                 'start_date': self.start_date_var.get(),
                 'end_date': self.end_date_var.get(),
+                    'exit_start_date': self.exit_start_date_var.get(),
+                    'exit_end_date': self.exit_end_date_var.get(),
                 'entry_strategy_filter': self.entry_strategy_filter_var.get(),
                 'exit_strategy_filter': self.exit_strategy_filter_var.get(),
                 'chart_symbol': self.chart_symbol_var.get(),
@@ -3833,8 +3923,12 @@ class TradeJournalApp:
         """Parse date filter inputs and refresh the table and summary."""
         start_str = self.start_date_var.get().strip()
         end_str = self.end_date_var.get().strip()
+        exit_start_str = self.exit_start_date_var.get().strip()
+        exit_end_str = self.exit_end_date_var.get().strip()
         self.start_date = None
         self.end_date = None
+        self.exit_start_date = None
+        self.exit_end_date = None
         # Parse start date
         if start_str:
             try:
@@ -3849,9 +3943,26 @@ class TradeJournalApp:
             except ValueError:
                 messagebox.showwarning("Invalid Date", f"End date '{end_str}' is not in YYYY-MM-DD format.")
                 return
+        # Parse exit start date
+        if exit_start_str:
+            try:
+                self.exit_start_date = dt.datetime.strptime(exit_start_str, "%Y-%m-%d").date()
+            except ValueError:
+                messagebox.showwarning("Invalid Date", f"Exit start date '{exit_start_str}' is not in YYYY-MM-DD format.")
+                return
+        # Parse exit end date
+        if exit_end_str:
+            try:
+                self.exit_end_date = dt.datetime.strptime(exit_end_str, "%Y-%m-%d").date()
+            except ValueError:
+                messagebox.showwarning("Invalid Date", f"Exit end date '{exit_end_str}' is not in YYYY-MM-DD format.")
+                return
         # If both dates provided, ensure start <= end
         if self.start_date and self.end_date and self.start_date > self.end_date:
             messagebox.showwarning("Invalid Range", "Start date cannot be after end date.")
+            return
+        if self.exit_start_date and self.exit_end_date and self.exit_start_date > self.exit_end_date:
+            messagebox.showwarning("Invalid Range", "Exit start date cannot be after exit end date.")
             return
         # Refresh table and summary/chart
         self.populate_table()
@@ -3870,6 +3981,10 @@ class TradeJournalApp:
         self.end_date_var.set("")
         self.start_date = None
         self.end_date = None
+        self.exit_start_date_var.set("")
+        self.exit_end_date_var.set("")
+        self.exit_start_date = None
+        self.exit_end_date = None
         # Reset top N filter and filter type
         self.top_n_var.set("")
         if hasattr(self, 'top_filter_set'):
@@ -4023,6 +4138,8 @@ class TradeJournalApp:
         closed_only = self.closed_only_var.get()
         entry_strategy_filter = self.entry_strategy_filter_var.get()
         exit_strategy_filter = self.exit_strategy_filter_var.get()
+        exit_start_date = getattr(self, "exit_start_date", None)
+        exit_end_date = getattr(self, "exit_end_date", None)
         # Check for top filter
         top_set = getattr(self, 'top_filter_set', None)
         
@@ -4045,7 +4162,8 @@ class TradeJournalApp:
         # Determine summary - always compute manually if strategy filters are active or top_set is present
         if top_set is None and not has_strategy_filter:
             summary = self.model.compute_summary(account_filter, closed_only=closed_only,
-                                                 start_date=self.start_date, end_date=self.end_date)
+                                                 start_date=self.start_date, end_date=self.end_date,
+                                                 exit_start_date=exit_start_date, exit_end_date=exit_end_date)
         else:
             # Compute summary from filtered trades
             total_pnl = 0.0
@@ -4077,6 +4195,15 @@ class TradeJournalApp:
                     continue
                 if self.end_date and trade.entry_date.date() > self.end_date:
                     continue
+                # Date range filter on exit_date (inclusive)
+                if exit_start_date or exit_end_date:
+                    if not trade.exit_date:
+                        continue
+                    exit_date = trade.exit_date.date()
+                    if exit_start_date and exit_date < exit_start_date:
+                        continue
+                    if exit_end_date and exit_date > exit_end_date:
+                        continue
                 # Closed-only filter: skip trades whose originating buy is still open
                 if closed_only:
                     if trade.buy_id < 0:
@@ -4155,7 +4282,8 @@ class TradeJournalApp:
         # Compute equity curve DataFrame
         if top_set is None and not has_strategy_filter:
             eq_df = self.model.equity_curve(account_filter, closed_only=closed_only,
-                                             start_date=self.start_date, end_date=self.end_date)
+                                             start_date=self.start_date, end_date=self.end_date,
+                                             exit_start_date=exit_start_date, exit_end_date=exit_end_date)
         else:
             # Build equity curve from filtered trades
             data: Dict[dt.date, float] = {}
