@@ -19,6 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
 import sys
+import re
 
 # ============================================================================
 # Configuration: Set the start date for pulling messages
@@ -83,45 +84,55 @@ def parse_strategy_and_symbols(text):
     if "Alert:" not in text or ("was added to" not in text and "were added to" not in text):
         return None, []
     
-    # Extract symbols - look for "New symbol:" or "New symbols:"
+    # Extract symbols - primary path for "New symbol:" / "New symbols:"
     for symbol_marker in ["New symbols:", "New symbol:"]:
         if symbol_marker in text:
             try:
                 start = text.find(symbol_marker) + len(symbol_marker)
-                # Find where symbols end (at "was added to" or "were added to")
                 rest = text[start:]
-                
-                # Look for the end of symbols (before was/were added to)
-                end_marker = None
-                end_pos = -1
-                for marker in ["was added to", "were added to"]:
-                    pos = rest.find(marker)
-                    if pos != -1 and (end_pos == -1 or pos < end_pos):
-                        end_pos = pos
-                        end_marker = marker
-                
+                end_pos = min([pos for pos in [rest.find("was added to"), rest.find("were added to")] if pos != -1] or [-1])
                 if end_pos != -1:
                     symbol_text = rest[:end_pos].strip()
-                    raw_symbols = symbol_text.split(",")
-                    symbols = [s.strip() for s in raw_symbols if s.strip()]
+                else:
+                    symbol_text = rest.strip()
+                raw_symbols = re.split(r"[,\s]+", symbol_text)
+                symbols = [s.strip() for s in raw_symbols if s.strip()]
             except Exception as e:
                 print(f"Warning: Could not parse symbols from text: {e}", file=sys.stderr)
             break
-    
+
     # Extract strategy name - after "was/were added to" and before period
     for added_marker in ["was added to", "were added to"]:
         if added_marker in text:
             try:
                 start = text.find(added_marker) + len(added_marker)
                 rest = text[start:].strip()
-                # Strategy ends at the first period
                 end = rest.find(".")
                 if end != -1:
                     strategy = rest[:end].strip()
+                else:
+                    strategy = rest
             except Exception as e:
                 print(f"Warning: Could not parse strategy from text: {e}", file=sys.stderr)
             break
-    
+
+    # Fallback: handle "Following list of symbols were added to ..." or similar variants
+    if (not symbols or not strategy) and "added to" in text:
+        try:
+            pattern = r"Alert:\s*(?:Following\s+list\s+of\s+symbols\s+|list\s+of\s+symbols\s+|symbols\s+)?(?P<symbols>.+?)\s+were\s+added\s+to\s+(?P<strategy>[^.]+)"
+            match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                symbol_text = match.group("symbols").strip()
+                raw_symbols = re.split(r"[,\s]+", symbol_text)
+                parsed_symbols = [s.strip() for s in raw_symbols if s.strip()]
+                if parsed_symbols:
+                    symbols = parsed_symbols
+                strategy_candidate = match.group("strategy").strip()
+                if strategy_candidate:
+                    strategy = strategy_candidate
+        except Exception as e:
+            print(f"Warning: Fallback parse failed: {e}", file=sys.stderr)
+
     return strategy, symbols
 
 
