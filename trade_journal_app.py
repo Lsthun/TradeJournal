@@ -31,7 +31,7 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 import pandas as pd
 import numpy as np
@@ -968,9 +968,9 @@ class TradeJournalModel:
         """Compute summary statistics for trades.
 
         Filters trades by account_number (if ``account_filter`` is provided), by date range on entry_date
-        (inclusive) and exit_date (inclusive), and optionally excludes trades whose originating buy position
-        has not been fully closed when ``closed_only`` is True. Only trades with exit_date and status==CLOSED
-        are counted as closed trades for statistics (requirement: trade = fully closed lot).
+        (inclusive) and exit_date (inclusive). When ``closed_only`` is True, trades without an exit are
+        skipped, but partial exits are still counted. Only trades with exit_date and status==CLOSED are
+        counted as closed trades for statistics.
         
         Returns:
             Dictionary with keys: total_pnl, num_trades, num_wins, num_losses, num_breakeven,
@@ -1007,12 +1007,9 @@ class TradeJournalModel:
                 continue
             if exit_end_date and trade.exit_date and trade.exit_date.date() > exit_end_date:
                 continue
-            # Closed-only filter: skip trades whose originating buy is still open
-            if closed_only:
-                if trade.buy_id < 0:
-                    continue
-                if self.open_qty_by_buy_id.get(trade.buy_id, 0.0) > 1e-8:
-                    continue
+            # Closed-only filter now includes partial exits; only skip trades with no exit
+            if closed_only and not trade.exit_date:
+                continue
             
             pnl = trade.pnl or 0.0
             pnl_pct = trade.pnl_pct or 0.0
@@ -1075,10 +1072,10 @@ class TradeJournalModel:
                      exit_start_date: Optional[dt.date] = None, exit_end_date: Optional[dt.date] = None) -> pd.DataFrame:
         """Return a DataFrame representing the cumulative equity over time.
 
-        Each closed trade contributes its P&L at the exit date.  Trades are filtered by account,
-        date range on entry date (inclusive) and exit date (inclusive), and optionally whether their
-        originating buy position is fully closed when ``closed_only`` is True. Dates outside the specified range are excluded. The DataFrame
-        contains columns 'date' and 'equity', sorted chronologically.
+        Each closed trade contributes its P&L at the exit date. Trades are filtered by account,
+        date range on entry date (inclusive) and exit date (inclusive). When ``closed_only`` is True,
+        trades without an exit are skipped, but partial exits are still included. Dates outside the
+        specified range are excluded. The DataFrame contains columns 'date' and 'equity', sorted chronologically.
         """
         data: Dict[dt.date, float] = {}
         for trade in self.trades:
@@ -1096,9 +1093,8 @@ class TradeJournalModel:
                 continue
             if exit_end_date and trade.exit_date and trade.exit_date.date() > exit_end_date:
                 continue
-            if closed_only:
-                if trade.buy_id < 0 or self.open_qty_by_buy_id.get(trade.buy_id, 0.0) > 1e-8:
-                    continue
+            if closed_only and not trade.exit_date:
+                continue
             exit_date = trade.exit_date.date()  # type: ignore
             data[exit_date] = data.get(exit_date, 0.0) + (trade.pnl or 0.0)
         dates = sorted(data.keys())
@@ -1142,10 +1138,17 @@ class TradeJournalApp:
         self._tree_tooltip_win = None
         self._tree_tooltip_label = None
         self._tree_tooltip_last = (None, None, None)  # (item_id, col_name, text)
+        # Keep only one date picker window alive at a time
+        self._date_picker_window: Optional[tk.Toplevel] = None
+        self._date_picker_allowed_widgets: Set[tk.Widget] = set()
+        # Accepted input date formats for typed filters
+        self.accepted_date_formats = ["%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m/%d/%y"]
         # Load persisted data (if available)
         self.load_persisted_data()
         # Register handler to save on close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Global click handler to close date picker when clicking outside
+        self.root.bind_all("<Button-1>", self._on_click_close_picker, add="+")
 
     def _build_ui(self) -> None:
         """Construct the user interface."""
@@ -1223,39 +1226,41 @@ class TradeJournalApp:
         closed_check.grid(row=1, column=7, padx=(0, 5), pady=2, sticky="w")
 
         # Row 2: Entry date filter fields
-        ttk.Label(top_frame, text="Entry Start (YYYY-MM-DD):").grid(row=2, column=0, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="Entry Start (preferred M/D/YYYY):").grid(row=2, column=0, padx=(0, 2), pady=2, sticky="e")
         self.start_date_var = tk.StringVar(value="")
         start_entry = ttk.Entry(top_frame, textvariable=self.start_date_var, width=12)
         # Bind a mouse click to open date picker
-        start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.start_date_var))
+        start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.start_date_var, source_widgets=[start_entry, start_pick_btn]))
         start_entry.grid(row=2, column=1, padx=(0, 2), pady=2)
         # Button to open date picker explicitly
-        start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.start_date_var))
+        start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.start_date_var, source_widgets=[start_entry, start_pick_btn]))
         start_pick_btn.grid(row=2, column=2, padx=(0, 5), pady=2)
-        ttk.Label(top_frame, text="Entry End (YYYY-MM-DD):").grid(row=2, column=3, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="Entry End (preferred M/D/YYYY):").grid(row=2, column=3, padx=(0, 2), pady=2, sticky="e")
         self.end_date_var = tk.StringVar(value="")
         end_entry = ttk.Entry(top_frame, textvariable=self.end_date_var, width=12)
-        end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.end_date_var))
+        end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.end_date_var, source_widgets=[end_entry, end_pick_btn]))
         end_entry.grid(row=2, column=4, padx=(0, 2), pady=2)
-        end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.end_date_var))
+        end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.end_date_var, source_widgets=[end_entry, end_pick_btn]))
         end_pick_btn.grid(row=2, column=5, padx=(0, 5), pady=2)
         apply_date_btn = ttk.Button(top_frame, text="Apply Date Filter", command=self.apply_date_filter)
         apply_date_btn.grid(row=2, column=6, padx=(0, 5), pady=2)
+        entry_clear_btn = ttk.Button(top_frame, text="✖", width=2, command=self.clear_entry_date_filter)
+        entry_clear_btn.grid(row=2, column=7, padx=(0, 5), pady=2, sticky="w")
 
         # Row 3: Exit date filter fields
-        ttk.Label(top_frame, text="Exit Start (YYYY-MM-DD):").grid(row=3, column=0, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="Exit Start (preferred M/D/YYYY):").grid(row=3, column=0, padx=(0, 2), pady=2, sticky="e")
         self.exit_start_date_var = tk.StringVar(value="")
         exit_start_entry = ttk.Entry(top_frame, textvariable=self.exit_start_date_var, width=12)
-        exit_start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_start_date_var))
+        exit_start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_start_date_var, source_widgets=[exit_start_entry, exit_start_pick_btn]))
         exit_start_entry.grid(row=3, column=1, padx=(0, 2), pady=2)
-        exit_start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_start_date_var))
+        exit_start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_start_date_var, source_widgets=[exit_start_entry, exit_start_pick_btn]))
         exit_start_pick_btn.grid(row=3, column=2, padx=(0, 5), pady=2)
-        ttk.Label(top_frame, text="Exit End (YYYY-MM-DD):").grid(row=3, column=3, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="Exit End (preferred M/D/YYYY):").grid(row=3, column=3, padx=(0, 2), pady=2, sticky="e")
         self.exit_end_date_var = tk.StringVar(value="")
         exit_end_entry = ttk.Entry(top_frame, textvariable=self.exit_end_date_var, width=12)
-        exit_end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_end_date_var))
+        exit_end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_end_date_var, source_widgets=[exit_end_entry, exit_end_pick_btn]))
         exit_end_entry.grid(row=3, column=4, padx=(0, 2), pady=2)
-        exit_end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_end_date_var))
+        exit_end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_end_date_var, source_widgets=[exit_end_entry, exit_end_pick_btn]))
         exit_end_pick_btn.grid(row=3, column=5, padx=(0, 5), pady=2)
         # Internal parsed date holders
         self.start_date = None
@@ -1264,6 +1269,8 @@ class TradeJournalApp:
         self.exit_end_date = None
         # Reuse the same apply button for both entry and exit date ranges
         ttk.Button(top_frame, text="Apply Date Filter", command=self.apply_date_filter).grid(row=3, column=6, padx=(0, 5), pady=2)
+        exit_clear_btn = ttk.Button(top_frame, text="✖", width=2, command=self.clear_exit_date_filter)
+        exit_clear_btn.grid(row=3, column=7, padx=(0, 5), pady=2, sticky="w")
 
         # Row 4: Strategy filters, clear filters and toggle table buttons
         ttk.Label(top_frame, text="Filter Entry:").grid(row=4, column=0, padx=(0, 2), pady=2, sticky="e")
@@ -3929,34 +3936,13 @@ class TradeJournalApp:
         self.end_date = None
         self.exit_start_date = None
         self.exit_end_date = None
-        # Parse start date
-        if start_str:
-            try:
-                self.start_date = dt.datetime.strptime(start_str, "%Y-%m-%d").date()
-            except ValueError:
-                messagebox.showwarning("Invalid Date", f"Start date '{start_str}' is not in YYYY-MM-DD format.")
-                return
-        # Parse end date
-        if end_str:
-            try:
-                self.end_date = dt.datetime.strptime(end_str, "%Y-%m-%d").date()
-            except ValueError:
-                messagebox.showwarning("Invalid Date", f"End date '{end_str}' is not in YYYY-MM-DD format.")
-                return
-        # Parse exit start date
-        if exit_start_str:
-            try:
-                self.exit_start_date = dt.datetime.strptime(exit_start_str, "%Y-%m-%d").date()
-            except ValueError:
-                messagebox.showwarning("Invalid Date", f"Exit start date '{exit_start_str}' is not in YYYY-MM-DD format.")
-                return
-        # Parse exit end date
-        if exit_end_str:
-            try:
-                self.exit_end_date = dt.datetime.strptime(exit_end_str, "%Y-%m-%d").date()
-            except ValueError:
-                messagebox.showwarning("Invalid Date", f"Exit end date '{exit_end_str}' is not in YYYY-MM-DD format.")
-                return
+        try:
+            self.start_date = self._parse_date_input(start_str, label="Start date")
+            self.end_date = self._parse_date_input(end_str, label="End date")
+            self.exit_start_date = self._parse_date_input(exit_start_str, label="Exit start date")
+            self.exit_end_date = self._parse_date_input(exit_end_str, label="Exit end date")
+        except ValueError:
+            return
         # If both dates provided, ensure start <= end
         if self.start_date and self.end_date and self.start_date > self.end_date:
             messagebox.showwarning("Invalid Range", "Start date cannot be after end date.")
@@ -3964,9 +3950,61 @@ class TradeJournalApp:
         if self.exit_start_date and self.exit_end_date and self.exit_start_date > self.exit_end_date:
             messagebox.showwarning("Invalid Range", "Exit start date cannot be after exit end date.")
             return
+        # Normalize displayed text to preferred M/D/YYYY format
+        if self.start_date:
+            self.start_date_var.set(self._format_date_preferred(self.start_date))
+        if self.end_date:
+            self.end_date_var.set(self._format_date_preferred(self.end_date))
+        if self.exit_start_date:
+            self.exit_start_date_var.set(self._format_date_preferred(self.exit_start_date))
+        if self.exit_end_date:
+            self.exit_end_date_var.set(self._format_date_preferred(self.exit_end_date))
         # Refresh table and summary/chart
         self.populate_table()
         self.update_summary_and_chart()
+
+    def clear_entry_date_filter(self) -> None:
+        """Clear entry date range fields and refresh filters."""
+        self.start_date_var.set("")
+        self.end_date_var.set("")
+        self.start_date = None
+        self.end_date = None
+        self.apply_date_filter()
+
+    def clear_exit_date_filter(self) -> None:
+        """Clear exit date range fields and refresh filters."""
+        self.exit_start_date_var.set("")
+        self.exit_end_date_var.set("")
+        self.exit_start_date = None
+        self.exit_end_date = None
+        self.apply_date_filter()
+
+    def _parse_date_input(self, value: str, *, label: Optional[str] = None) -> Optional[dt.date]:
+        """Parse a date string using multiple accepted formats.
+
+        Accepted formats: YYYY-MM-DD, YYYY/MM/DD, M/D/YYYY, M/D/YY. Raises ValueError if
+        parsing fails and a label is provided (to show a warning).
+        """
+        value = value.strip()
+        if not value:
+            return None
+        for fmt in self.accepted_date_formats:
+            try:
+                return dt.datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+        if label:
+            messagebox.showwarning(
+                "Invalid Date",
+                f"{label} '{value}' is not in an accepted format. Try YYYY-MM-DD, YYYY/MM/DD, M/D/YYYY, or M/D/YY.",
+            )
+            raise ValueError(f"Invalid date for {label}")
+        return None
+
+    @staticmethod
+    def _format_date_preferred(date_obj: dt.date) -> str:
+        """Return date as M/D/YYYY (no zero padding) for display consistency."""
+        return f"{date_obj.month}/{date_obj.day}/{date_obj.year}"
 
     def clear_filters(self) -> None:
         """Reset all filter settings to their defaults and refresh the display.
@@ -4001,13 +4039,23 @@ class TradeJournalApp:
         self.populate_table()
         self.update_summary_and_chart()
 
-    def open_date_picker(self, date_var: tk.StringVar) -> None:
+    def open_date_picker(self, date_var: tk.StringVar, source_widgets: Optional[List[tk.Widget]] = None) -> None:
         """Open a simple date picker dialog to select a date and set it to the provided StringVar.
 
         The date picker defaults to the current month and year. When the user selects a day,
         the date is formatted as YYYY-MM-DD and assigned to ``date_var``. This function
         creates a modal top-level window with navigation to previous/next months.
         """
+        # Close any existing picker to avoid stacking multiple calendars
+        if self._date_picker_window is not None and self._date_picker_window.winfo_exists():
+            try:
+                self._date_picker_window.destroy()
+            except Exception:
+                pass
+            self._date_picker_window = None
+        # Track widgets related to this picker so outside clicks can close it
+        self._date_picker_allowed_widgets = set(source_widgets or [])
+        parse_date = self._parse_date_input
         # Inner class for date picker dialog
         class DatePicker(tk.Toplevel):
             def __init__(self, parent, var: tk.StringVar):
@@ -4016,10 +4064,7 @@ class TradeJournalApp:
                 self.resizable(False, False)
                 self.var = var
                 # Determine initial month/year from existing value or current date
-                try:
-                    current = dt.datetime.strptime(var.get(), "%Y-%m-%d").date()
-                except Exception:
-                    current = dt.date.today()
+                current = parse_date(var.get()) or dt.date.today()
                 self.year = current.year
                 self.month = current.month
                 # Build UI
@@ -4068,7 +4113,7 @@ class TradeJournalApp:
             def select_day(self, day: int) -> None:
                 # Set selected date
                 date_obj = dt.date(self.year, self.month, day)
-                self.var.set(date_obj.strftime("%Y-%m-%d"))
+                self.var.set(TradeJournalApp._format_date_preferred(date_obj))
                 self.destroy()
 
             def prev_month(self) -> None:
@@ -4091,11 +4136,83 @@ class TradeJournalApp:
 
         # Instantiate date picker and center it relative to parent
         picker = DatePicker(self.root, date_var)
+        self._date_picker_window = picker
+        picker.bind("<Destroy>", self._on_date_picker_destroy)
+        picker.bind("<FocusOut>", lambda e: picker.after(50, self._close_picker_if_inactive))
         # Position the picker near the mouse pointer
         self.root.update_idletasks()
         x = self.root.winfo_pointerx()
         y = self.root.winfo_pointery()
         picker.geometry(f"+{x}+{y}")
+
+    def _on_date_picker_destroy(self, event: Optional[tk.Event] = None) -> None:
+        """Clear the stored date picker reference when the window is closed."""
+        if self._date_picker_window is None:
+            return
+        if event is None or event.widget == self._date_picker_window:
+            self._date_picker_window = None
+            self._date_picker_allowed_widgets.clear()
+
+    def _close_picker_if_inactive(self) -> None:
+        """Close the date picker if focus has moved outside it."""
+        picker = self._date_picker_window
+        if picker is None or not picker.winfo_exists():
+            self._date_picker_window = None
+            self._date_picker_allowed_widgets.clear()
+            return
+        focus_widget = picker.focus_get()
+        # If nothing focused inside picker, close it
+        if focus_widget is None:
+            picker.destroy()
+            self._date_picker_allowed_widgets.clear()
+            return
+        # Walk up parents to see if focus is within picker
+        w = focus_widget
+        while w is not None:
+            if w == picker:
+                return
+            w = w.master
+        picker.destroy()
+        self._date_picker_allowed_widgets.clear()
+
+    def _on_click_close_picker(self, event: tk.Event) -> None:
+        """Close the date picker when clicking outside allowed widgets/picker."""
+        picker = self._date_picker_window
+        if picker is None or not picker.winfo_exists():
+            self._date_picker_window = None
+            self._date_picker_allowed_widgets.clear()
+            return
+        target = getattr(event, "widget", None)
+        if target is None:
+            return
+        if self._is_descendant(target, picker):
+            return
+        if self._widget_is_allowed(target):
+            return
+        try:
+            picker.destroy()
+        finally:
+            self._date_picker_window = None
+            self._date_picker_allowed_widgets.clear()
+
+    def _widget_is_allowed(self, widget: tk.Widget) -> bool:
+        """Return True if widget is in the allowed list or a child of one."""
+        for allowed in list(self._date_picker_allowed_widgets):
+            if allowed is None:
+                continue
+            if widget == allowed or self._is_descendant(widget, allowed):
+                return True
+        return False
+
+    @staticmethod
+    def _is_descendant(widget: tk.Widget, ancestor: tk.Widget) -> bool:
+        """Return True if widget is ancestor or descendant relationship matches."""
+        w = widget
+        while w is not None:
+            if w == ancestor:
+                return True
+            w = getattr(w, "master", None)
+        return False
 
     def on_account_filter_change(self, event: tk.Event) -> None:
         """Update summary and chart when account filter changes."""
@@ -4204,12 +4321,9 @@ class TradeJournalApp:
                         continue
                     if exit_end_date and exit_date > exit_end_date:
                         continue
-                # Closed-only filter: skip trades whose originating buy is still open
-                if closed_only:
-                    if trade.buy_id < 0:
-                        continue
-                    if self.model.open_qty_by_buy_id.get(trade.buy_id, 0.0) > 1e-8:
-                        continue
+                # Closed-only filter now includes partial exits; only skip trades with no exit
+                if closed_only and not trade.exit_date:
+                    continue
                 pnl = trade.pnl or 0.0
                 pnl_pct = trade.pnl_pct or 0.0
                 total_pnl += pnl
@@ -4304,12 +4418,9 @@ class TradeJournalApp:
                     continue
                 if self.end_date and exit_date_dt > self.end_date:
                     continue
-                # Closed-only filter
-                if closed_only:
-                    if trade.buy_id < 0:
-                        continue
-                    if self.model.open_qty_by_buy_id.get(trade.buy_id, 0.0) > 1e-8:
-                        continue
+                # Closed-only filter now includes partial exits; only skip trades with no exit
+                if closed_only and not trade.exit_date:
+                    continue
                 data[exit_date_dt] = data.get(exit_date_dt, 0.0) + (trade.pnl or 0.0)
             dates = sorted(data.keys())
             equity_values = []
