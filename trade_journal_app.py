@@ -29,7 +29,10 @@ import csv
 import datetime as dt
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Set
 
@@ -1119,6 +1122,11 @@ class TradeJournalApp:
         self.db_path = os.path.join(script_dir, 'price_data.db')
         # Initialize price data manager
         self.price_manager = PriceDataManager(self.db_path)
+        # Text area sizing state (initialize before building UI so widgets can read defaults)
+        self.entry_text_default_height = 3
+        self.exit_text_default_height = 3
+        self.entry_text_height = tk.IntVar(value=self.entry_text_default_height)
+        self.exit_text_height = tk.IntVar(value=self.exit_text_default_height)
         # UI elements
         self._build_ui()
         # Sorting state: which column and whether descending
@@ -1192,6 +1200,9 @@ class TradeJournalApp:
         self.account_dropdown = ttk.Combobox(top_frame, textvariable=self.account_var, state="readonly", width=15)
         self.account_dropdown.grid(row=0, column=6, padx=(0, 5), pady=2)
         self.account_dropdown.bind("<<ComboboxSelected>>", self.on_account_filter_change)
+
+        sync_alerts_btn = ttk.Button(top_frame, text="Sync Alerts", command=self.sync_alerts_to_entry_strategies)
+        sync_alerts_btn.grid(row=0, column=7, padx=(0, 5), pady=2)
 
         # Row 1: Group toggle + Top N filter controls
         self.group_var = tk.BooleanVar(value=True)
@@ -1438,19 +1449,54 @@ class TradeJournalApp:
         right_canvas.pack(side="left", fill="both", expand=True)
         right_scrollbar.pack(side="right", fill="y")
         
-        # Entry Strategy label and text
+        # Entry Strategy label and resizable text
         ttk.Label(right_scrollable_frame, text="Entry Strategy:").pack(anchor="w")
         ttk.Label(right_scrollable_frame, text="(comma-separated for multiple)", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w")
-        self.entry_strategy_text = tk.Text(right_scrollable_frame, height=3, width=30)
-        self.entry_strategy_text.pack(fill=tk.X, pady=(0, 5))
+        entry_container = ttk.Frame(right_scrollable_frame)
+        entry_container.pack(fill=tk.X, pady=(0, 5))
+        self.entry_strategy_text = tk.Text(entry_container, height=self.entry_text_height.get(), width=30, wrap="word")
+        self.entry_strategy_text.pack(side="left", fill=tk.BOTH, expand=True)
         self.entry_strategy_text.bind("<KeyRelease>", lambda e: self._auto_save_fields())
+        entry_grip = ttk.Sizegrip(entry_container)
+        entry_grip.pack(side="right", anchor="se")
+        def _entry_start_drag(event):
+            entry_grip._start_y = event.y_root
+        def _entry_drag(event):
+            dy = event.y_root - getattr(entry_grip, "_start_y", event.y_root)
+            lines = max(2, self.entry_text_height.get() + int(dy / 18))
+            if lines != self.entry_text_height.get():
+                self.entry_text_height.set(lines)
+                self.entry_strategy_text.configure(height=lines)
+                self._auto_save_fields()
+            entry_grip._start_y = event.y_root
+        entry_grip.bind("<ButtonPress-1>", _entry_start_drag)
+        entry_grip.bind("<B1-Motion>", _entry_drag)
         
-        # Exit Strategy label and text
+        # Exit Strategy label and resizable text
         ttk.Label(right_scrollable_frame, text="Exit Strategy:").pack(anchor="w")
         ttk.Label(right_scrollable_frame, text="(comma-separated for multiple)", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w")
-        self.exit_strategy_text = tk.Text(right_scrollable_frame, height=3, width=30)
-        self.exit_strategy_text.pack(fill=tk.X, pady=(0, 5))
+        exit_container = ttk.Frame(right_scrollable_frame)
+        exit_container.pack(fill=tk.X, pady=(0, 5))
+        self.exit_strategy_text = tk.Text(exit_container, height=self.exit_text_height.get(), width=30, wrap="word")
+        self.exit_strategy_text.pack(side="left", fill=tk.BOTH, expand=True)
         self.exit_strategy_text.bind("<KeyRelease>", lambda e: self._auto_save_fields())
+        exit_grip = ttk.Sizegrip(exit_container)
+        exit_grip.pack(side="right", anchor="se")
+        def _exit_start_drag(event):
+            exit_grip._start_y = event.y_root
+        def _exit_drag(event):
+            dy = event.y_root - getattr(exit_grip, "_start_y", event.y_root)
+            lines = max(2, self.exit_text_height.get() + int(dy / 18))
+            if lines != self.exit_text_height.get():
+                self.exit_text_height.set(lines)
+                self.exit_strategy_text.configure(height=lines)
+                self._auto_save_fields()
+            exit_grip._start_y = event.y_root
+        exit_grip.bind("<ButtonPress-1>", _exit_start_drag)
+        exit_grip.bind("<B1-Motion>", _exit_drag)
+        
+        reset_sizes_btn = ttk.Button(right_scrollable_frame, text="Reset Text Sizes", command=self._reset_text_sizes)
+        reset_sizes_btn.pack(anchor="w", pady=(0, 5))
         
         # Note label and text
         ttk.Label(right_scrollable_frame, text="Trade Note:").pack(anchor="w")
@@ -2270,6 +2316,185 @@ class TradeJournalApp:
         except Exception:
             pass
 
+    def sync_alerts_to_entry_strategies(self) -> None:
+        """Run alert extraction/matching and apply SAME_DAY_ENTRY strategies to trades."""
+        scripts_dir = Path(__file__).resolve().parent / "messages-trade-matcher"
+        extract_script = scripts_dir / "extract_alerts.py"
+        match_script = scripts_dir / "match_alerts_to_trades.py"
+
+        start_prompt = simpledialog.askstring("Sync Alerts", "Start date (YYYY-MM-DD):", initialvalue=self.start_date_var.get() or "")
+        if start_prompt is None:
+            return
+        end_prompt = simpledialog.askstring("Sync Alerts", "End date (YYYY-MM-DD):", initialvalue=self.end_date_var.get() or "")
+        if end_prompt is None:
+            return
+
+        try:
+            start_date = dt.datetime.strptime(start_prompt.strip(), "%Y-%m-%d").date() if start_prompt and start_prompt.strip() else None
+            end_date = dt.datetime.strptime(end_prompt.strip(), "%Y-%m-%d").date() if end_prompt and end_prompt.strip() else None
+        except ValueError:
+            messagebox.showerror("Sync Alerts", "Dates must use YYYY-MM-DD format.")
+            return
+        if start_date and end_date and start_date > end_date:
+            messagebox.showerror("Sync Alerts", "Start date must be on or before end date.")
+            return
+
+        if not scripts_dir.exists() or not extract_script.exists() or not match_script.exists():
+            messagebox.showerror("Sync Alerts", f"Could not find alert scripts in {scripts_dir}")
+            return
+
+        source_db = Path.home() / "Library" / "Messages" / "chat.db"
+        dest_db = Path.home() / "Desktop" / "chat_backup.db"
+        try:
+            dest_db.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_db, dest_db)
+        except PermissionError:
+            if dest_db.exists():
+                # If a manual copy already exists, continue without blocking
+                messagebox.showinfo(
+                    "Sync Alerts",
+                    "Could not read Messages database due to macOS privacy settings, using existing Desktop/chat_backup.db instead."
+                )
+            else:
+                messagebox.showerror(
+                    "Sync Alerts",
+                    "Permission denied reading ~/Library/Messages/chat.db.\n"
+                    "Grant Full Disk Access to Python (or VS Code), or manually copy chat.db to Desktop as chat_backup.db and retry."
+                )
+                return
+        except FileNotFoundError:
+            messagebox.showerror("Sync Alerts", f"Messages database not found at {source_db}")
+            return
+        except Exception as e:
+            messagebox.showerror("Sync Alerts", f"Failed to copy chat.db: {e}")
+            return
+
+        # Persist current journal so matcher sees latest trades
+        self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+
+        for script_path, label in [(extract_script, "Extract alerts"), (match_script, "Match alerts to trades")]:
+            try:
+                result = subprocess.run([sys.executable, str(script_path)], cwd=scripts_dir, capture_output=True, text=True)
+            except Exception as e:
+                messagebox.showerror("Sync Alerts", f"{label} failed: {e}")
+                return
+            if result.returncode != 0:
+                err_text = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                messagebox.showerror("Sync Alerts", f"{label} failed (exit {result.returncode}).\n{err_text}")
+                return
+
+        alerts_path = scripts_dir / "alerts_matched.csv"
+        if not alerts_path.exists():
+            messagebox.showerror("Sync Alerts", f"alerts_matched.csv not found at {alerts_path}")
+            return
+        try:
+            df = pd.read_csv(alerts_path)
+        except Exception as e:
+            messagebox.showerror("Sync Alerts", f"Could not read alerts_matched.csv: {e}")
+            return
+
+        required_cols = {"symbol", "strategy", "trade_entry_date", "match_type"}
+        if not required_cols.issubset(set(df.columns)):
+            missing = required_cols - set(df.columns)
+            messagebox.showerror("Sync Alerts", f"alerts_matched.csv is missing columns: {', '.join(sorted(missing))}")
+            return
+
+        allowed_match_types = {"SAME_DAY_ENTRY", "TRADE_1D_AFTER_ALERT", "TRADE_2D_AFTER_ALERT"}
+        df = df[df["match_type"].isin(allowed_match_types)].copy()
+        if df.empty:
+            messagebox.showinfo("Sync Alerts", "No SAME_DAY_ENTRY or 1-2 day pre-alert rows found.")
+            return
+
+        df["trade_entry_date"] = pd.to_datetime(df["trade_entry_date"], errors="coerce").dt.date
+        df["alert_date_parsed"] = pd.to_datetime(df.get("alert_date"), errors="coerce").dt.date
+        df = df.dropna(subset=["trade_entry_date", "alert_date_parsed"])
+        df["strategy"] = df["strategy"].fillna("").astype(str)
+        df["symbol"] = df["symbol"].fillna("").astype(str).str.upper()
+
+        def clean_strategy_name(raw: str) -> str:
+            s = raw or ""
+            # Strip known noisy prefixes
+            bad_chunks = [
+                "breakfutpennies-holdingsactual-",
+                "breakfutpennies-holdings-",
+                "breakfutpennies-hold-",
+                "breakfutpennies-",
+            ]
+            for chunk in bad_chunks:
+                s = re.sub(chunk, "", s, flags=re.IGNORECASE)
+            # Drop ticker-like tokens (short all-caps/digits) that may have bled into the strategy field
+            tokens = re.split(r"[\s,;]+", s)
+            kept = [t for t in tokens if not re.fullmatch(r"[A-Z0-9]{1,6}", t)]
+            cleaned = " ".join([t for t in kept if t]).strip(" -_,;")
+            return cleaned or s.strip()
+
+        df["strategy"] = df["strategy"].apply(clean_strategy_name)
+
+        if start_date:
+            df = df[df["trade_entry_date"] >= start_date]
+        if end_date:
+            df = df[df["trade_entry_date"] <= end_date]
+        # Ensure alert is on or before entry and within 2 days gap
+        df = df[(df["trade_entry_date"] - df["alert_date_parsed"] <= pd.Timedelta(days=2)) &
+                (df["trade_entry_date"] >= df["alert_date_parsed"])]
+        df = df[df["strategy"].str.strip() != ""]
+        if df.empty:
+            messagebox.showinfo("Sync Alerts", "No matching rows after date filtering.")
+            return
+
+        trade_lookup: Dict[Tuple[str, dt.date], List[TradeEntry]] = {}
+        for trade in self.model.trades:
+            trade_lookup.setdefault((trade.symbol.upper(), trade.entry_date.date()), []).append(trade)
+
+        def merge_strategies(existing: str, additions: List[str]) -> str:
+            existing_parts = [p.strip() for p in re.split(r"[,\r\n;\t]+", existing) if p.strip()] if existing else []
+            combined = list(existing_parts)
+            seen_lower = {p.lower() for p in existing_parts}
+            for raw in additions:
+                clean = raw.strip()
+                if not clean:
+                    continue
+                lower = clean.lower()
+                if lower not in seen_lower:
+                    combined.append(clean)
+                    seen_lower.add(lower)
+            return ", ".join(combined)
+
+        updated = 0
+        updated_keys = set()
+        for _, row in df.iterrows():
+            symbol_key = row["symbol"]
+            entry_dt = row["trade_entry_date"]
+            strategy_text = row["strategy"]
+            for trade in trade_lookup.get((symbol_key, entry_dt), []):
+                trade_key = self.model.compute_key(trade)
+                merged = merge_strategies(self.model.entry_strategies.get(trade_key, ""), [strategy_text])
+                if merged != self.model.entry_strategies.get(trade_key, ""):
+                    self.model.entry_strategies[trade_key] = merged
+                    updated += 1
+                    updated_keys.add(trade_key)
+
+        if not updated:
+            messagebox.showinfo("Sync Alerts", "No trades were updated for the selected range.")
+            return
+
+        self.populate_table()
+        self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+        # Build a short sample list to help locate updated rows
+        samples = []
+        for trade in self.model.trades:
+            key = self.model.compute_key(trade)
+            if key in updated_keys:
+                samples.append(f"{trade.symbol} @ {trade.entry_date.date()} → {self.model.entry_strategies.get(key, '')}")
+                if len(samples) >= 5:
+                    break
+        sample_text = "\n".join(samples)
+        extra_hint = "\n\nIf you don't see them, clear date filters or expand grouped symbols." if samples else ""
+        messagebox.showinfo(
+            "Sync Alerts",
+            f"Updated entry strategies on {len(updated_keys)} trade(s).{extra_hint}" + (f"\n\nExamples:\n{sample_text}" if samples else "")
+        )
+
     def toggle_table_visibility(self) -> None:
         """Toggle the visibility of the table pane."""
         if self.table_visible.get():
@@ -2969,7 +3194,11 @@ class TradeJournalApp:
         self.tree.set(item_id, "note", note)
         
         # Persist changes to disk
-        self.model.save_state(self.persist_path, filter_state={
+        self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+
+    def _current_filter_state(self) -> dict:
+        """Return current UI filter state for persistence."""
+        return {
             "account_filter": self.account_var.get(),
             "start_date": self.start_date_var.get(),
             "end_date": self.end_date_var.get(),
@@ -2979,7 +3208,14 @@ class TradeJournalApp:
             "group_by_symbol": self.group_var.get(),
             "entry_strategy_filter": self.entry_strategy_filter_var.get(),
             "exit_strategy_filter": self.exit_strategy_filter_var.get(),
-        })
+        }
+
+    def _reset_text_sizes(self) -> None:
+        """Reset entry/exit strategy text boxes to default heights."""
+        self.entry_text_height.set(self.entry_text_default_height)
+        self.exit_text_height.set(self.exit_text_default_height)
+        self.entry_strategy_text.configure(height=self.entry_text_default_height)
+        self.exit_strategy_text.configure(height=self.exit_text_default_height)
 
     def _resolve_screenshot_path(self, filepath: str) -> str:
         """Resolve a screenshot filepath (relative or absolute) to absolute path.
