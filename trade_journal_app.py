@@ -648,6 +648,7 @@ class TradeJournalModel:
         self.duplicate_transactions.clear()
         self.duplicate_count = 0
         # Capture keys from prior sessions to detect duplicates across sessions
+        # Keys are stored using date-only run_date to tolerate re-exports with different times
         existing_keys = set(self.seen_tx_keys)
         new_keys: set = set()
         try:
@@ -738,19 +739,19 @@ class TradeJournalModel:
                         amount=amount,
                         settlement_date=settlement_date,
                     )
-                    # Compute duplicate key
-                    key = (run_date, acct_num, symbol, qty, price, amount)
-                    # Check duplicates across sessions only
-                    if key in existing_keys:
-                        # Record duplicate and skip adding to transactions
+                    # Compute duplicate keys
+                    key_date = (run_date.date(), acct_num, symbol, qty, price, amount)
+                    key_dt = (run_date, acct_num, symbol, qty, price, amount)
+                    # Check duplicates both across sessions and within this load; tolerate older datetime-style keys
+                    if key_date in existing_keys or key_dt in existing_keys or key_date in new_keys or key_dt in new_keys:
                         self.duplicate_transactions.append(tx)
                         self.duplicate_count += 1
                         continue
-                    # Accept this transaction and record key for this file
-                    new_keys.add(key)
+                    # Accept this transaction and record key for this file (store date-only for consistency)
+                    new_keys.add(key_date)
                     self.transactions.append(tx)
             # Finished reading file
-            # Update global seen keys with new keys from this import
+            # Update global seen keys with new keys from this import (date-only form)
             self.seen_tx_keys.update(new_keys)
         except Exception as e:
             raise RuntimeError(f"Failed to load CSV: {e}")
@@ -797,6 +798,14 @@ class TradeJournalModel:
             self.entry_strategies = data.get('entry_strategies', {})
             self.exit_strategies = data.get('exit_strategies', {})
             self.seen_tx_keys = data.get('seen_tx_keys', set())
+            # Normalize seen_tx_keys to use date-only run_date (handles older datetime-stored keys)
+            normalized_keys = set()
+            for k in self.seen_tx_keys:
+                if isinstance(k, tuple) and len(k) == 6:
+                    run_date_part = k[0]
+                    run_date_norm = run_date_part.date() if isinstance(run_date_part, dt.datetime) else run_date_part
+                    normalized_keys.add((run_date_norm, k[1], k[2], k[3], k[4], k[5]))
+            self.seen_tx_keys = normalized_keys
             
             # Migrate old screenshot format (string) to new format (list of dicts)
             self._migrate_screenshots_format()
@@ -3824,8 +3833,8 @@ class TradeJournalApp:
                 amount=amount,
                 settlement_date=None,
             )
-            # Compute duplicate key for this transaction
-            key = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount)
+            # Compute duplicate key using date-only run_date for consistency with CSV imports
+            key = (tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount)
             # Check if duplicate across sessions (using model.seen_tx_keys). If so, ignore.
             if key in self.model.seen_tx_keys:
                 messagebox.showinfo("Duplicate", "This transaction already exists in the journal and will be ignored.")
