@@ -1,11 +1,11 @@
 # Data files
 *.csv
 !alerts_matched.csv
-*.db
-*.html
 # Track journal state but ignore other pickle files
 !journal_state.pkl
 *.pkl
+*.db
+*.html
 
 # Cached files
 __pycache__/
