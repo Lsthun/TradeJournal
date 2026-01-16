@@ -3546,21 +3546,23 @@ class TradeJournalApp:
                     continue
 
                 symbol_upper = symbol.upper()
-                candidates: List[tuple] = []
+                candidates: List[Tuple[tuple, bool]] = []  # (trade_key, is_exit_match)
                 for trade_key, trade_symbol, entry_d, exit_d in trade_info:
                     if trade_symbol != symbol_upper:
                         continue
-                    if shot_date != entry_d and (exit_d is None or shot_date != exit_d):
+                    is_exit_match = exit_d is not None and shot_date == exit_d
+                    is_entry_match = shot_date == entry_d
+                    if not (is_entry_match or is_exit_match):
                         continue
-                    candidates.append(trade_key)
+                    candidates.append((trade_key, is_exit_match))
 
                 if not candidates:
                     skipped_no_match += 1
                     continue
 
-                # Pick the matching trade with the fewest screenshots so far (balances multi-lot days)
-                candidates.sort(key=lambda k: (screenshot_counts.get(k, 0), k))
-                target_key = candidates[0]
+                # Prefer exit-date matches, then fewer screenshots (balances multi-lot days)
+                candidates.sort(key=lambda item: (0 if item[1] else 1, screenshot_counts.get(item[0], 0), item[0]))
+                target_key = candidates[0][0]
 
                 if self._attach_screenshot_to_trade(target_key, full_path, os.path.basename(fname)):
                     added += 1
