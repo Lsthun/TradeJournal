@@ -1830,22 +1830,78 @@ class TradeJournalApp:
             return
 
         try:
-            # Get price data
-            metadata = self.price_manager.get_metadata(symbol)
-            if metadata:
-                start_date = dt.datetime.fromisoformat(metadata['start_date']).date()
-                end_date = dt.datetime.fromisoformat(metadata['end_date']).date()
-            else:
-                start_date = dt.date.today() - dt.timedelta(days=180)
-                end_date = dt.date.today()
+            # Get trades for this symbol (case-insensitive)
+            trades_for_symbol = [t for t in self.model.trades if t.symbol.upper() == symbol.upper()]
 
-            df = self.price_manager.get_price_data(symbol, start_date, end_date)
+            # Determine required price range based on trades (pads 90 days before first entry and up to today/last exit)
+            if trades_for_symbol:
+                first_entry = min(t.entry_date for t in trades_for_symbol).date()
+                last_exit = max((t.exit_date for t in trades_for_symbol if t.exit_date), default=None)
+                latest_trade_date = max((t.exit_date or t.entry_date for t in trades_for_symbol)).date()
+                has_open_trade = any(t.exit_date is None for t in trades_for_symbol)
+                required_start = first_entry - dt.timedelta(days=90)
+                # Pad 7 days past the latest trade to ensure yfinance's exclusive end range includes it
+                padded_latest = latest_trade_date + dt.timedelta(days=7)
+                required_end = min((last_exit + dt.timedelta(days=90)).date(), dt.date.today()) if last_exit else dt.date.today()
+                required_end = max(required_end, padded_latest)
+                # If any position is still open, always fetch through (today + 1) to cover the current candle
+                if has_open_trade:
+                    required_end = max(required_end, dt.date.today() + dt.timedelta(days=1))
+            else:
+                required_start = dt.date.today() - dt.timedelta(days=180)
+                required_end = dt.date.today()
+
+            # Check cached metadata to see if we need to refresh to include new (open) trades
+            metadata = self.price_manager.get_metadata(symbol)
+            needs_refresh = False
+            meta_start = None
+            meta_end = None
+            if metadata:
+                meta_start = dt.datetime.fromisoformat(metadata['start_date']).date()
+                meta_end = dt.datetime.fromisoformat(metadata['end_date']).date()
+                if meta_start > required_start or meta_end < required_end:
+                    needs_refresh = True
+            else:
+                needs_refresh = True
+
+            df: Optional[pd.DataFrame] = None
+            if needs_refresh:
+                if not HAS_YFINANCE:
+                    messagebox.showerror("Missing Dependency",
+                                       "yfinance is required to refresh price data. Install with: pip install yfinance")
+                    return
+                self.chart_status_var.set(f"Updating price data for {symbol}...")
+                self.root.update()
+                fetch_result = self.price_manager.fetch_and_store(symbol, required_start, required_end)
+                if fetch_result is None or fetch_result.empty:
+                    self.chart_status_var.set(f"No price data available for {symbol}")
+                    return
+                df = self.price_manager.get_price_data(symbol, required_start, required_end)
+                meta_start, meta_end = required_start, required_end
+            else:
+                meta_start = meta_start or required_start
+                meta_end = meta_end or required_end
+                df = self.price_manager.get_price_data(symbol, meta_start, meta_end)
+
             if df is None or df.empty:
                 self.chart_status_var.set(f"No price data available for {symbol}")
                 return
 
-            # Get trades for this symbol (case-insensitive)
-            trades_for_symbol = [t for t in self.model.trades if t.symbol.upper() == symbol.upper()]
+            # If any trade dates are missing from the price data, extend the range and refetch once
+            trade_dates = {t.entry_date.date() for t in trades_for_symbol} | {t.exit_date.date() for t in trades_for_symbol if t.exit_date}
+            missing_dates = [d for d in trade_dates if d not in df.index.date]
+            if missing_dates and HAS_YFINANCE:
+                extend_to = max(required_end, max(missing_dates) + dt.timedelta(days=7))
+                if any(t.exit_date is None for t in trades_for_symbol):
+                    extend_to = max(extend_to, dt.date.today() + dt.timedelta(days=1))
+                self.chart_status_var.set(f"Extending price data for {symbol}...")
+                self.root.update()
+                fetch_result = self.price_manager.fetch_and_store(symbol, required_start, extend_to)
+                if fetch_result is not None and not fetch_result.empty:
+                    df = self.price_manager.get_price_data(symbol, required_start, extend_to)
+                    meta_end = extend_to
+                else:
+                    self.chart_status_var.set(f"Price data missing around trade dates for {symbol}")
             
             # Populate the trades list in the chart tab
             self._populate_chart_trades_list(symbol)
@@ -3314,18 +3370,14 @@ class TradeJournalApp:
                 date = dt.date.today()
         return symbol, date
 
-    def _attach_screenshot_to_trade(self, trade_key: tuple, filepath: str, label: str, existing_abs: Set[str]) -> bool:
-        """Attach screenshot if not already attached to this or any trade. Updates existing_abs."""
-        resolved_abs = os.path.abspath(filepath)
-        if resolved_abs in existing_abs:
-            return False
+    def _attach_screenshot_to_trade(self, trade_key: tuple, filepath: str, label: str) -> bool:
+        """Attach screenshot to a trade unless that trade already has it (per-trade dedupe)."""
         stored_path = self._make_screenshot_path_relative(filepath)
         if trade_key not in self.model.screenshots:
             self.model.screenshots[trade_key] = []
         if any(s.get("filepath") == stored_path for s in self.model.screenshots[trade_key]):
             return False
         self.model.screenshots[trade_key].append({"filepath": stored_path, "label": label})
-        existing_abs.add(resolved_abs)
         return True
 
     def add_screenshot(self) -> None:
@@ -3434,13 +3486,13 @@ class TradeJournalApp:
             if current_selection and item_id in current_selection:
                 # Trigger the on_tree_select logic to refresh all displays
                 self.on_tree_select(None)
-        
+
         def cancel_it():
             preview_win.destroy()
-        
+
         # Save automatically on close
         preview_win.protocol("WM_DELETE_WINDOW", lambda: (save_on_close(), preview_win.destroy()))
-        
+
         ttk.Button(button_frame, text="Add Screenshot", command=lambda: (save_on_close(), preview_win.destroy())).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel_it).pack(side=tk.LEFT, padx=5)
 
@@ -3449,18 +3501,17 @@ class TradeJournalApp:
 
         Rules:
         - Symbol comes from the leading token in the filename (letters only, uppercased).
-        - Date comes from the filename (YYYY-MM-DD / YYYYMMDD / MM-DD-YYYY / MMDDYYYY);
-          if missing, falls back to file modified date.
+        - Date comes from the filename (YYYY-MM-DD / YYYYMMDD / MM-DD-YYYY / MMDDYYYY); if missing,
+          falls back to file modified date.
         - Matches trades on same symbol (case-insensitive) and same entry or exit date.
-        - Avoids attaching a screenshot already attached anywhere (global dedupe).
+        - Balances attachments across matching trades by choosing the trade with the fewest screenshots
+          so far (per-trade dedupe only).
         """
         folder = filedialog.askdirectory(title="Select screenshot folder to scan")
         if not folder:
             return
 
         exts = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
-        existing_abs = self._collect_existing_screenshot_paths()
-
         added = 0
         skipped_duplicate = 0
         skipped_no_symbol = 0
@@ -3468,11 +3519,13 @@ class TradeJournalApp:
 
         # Precompute trade keys and dates for matching
         trade_info: List[Tuple[tuple, str, dt.date, Optional[dt.date]]] = []
+        screenshot_counts: Dict[tuple, int] = {}
         for trade in self.model.trades:
             key = self.model.compute_key(trade)
             entry_d = trade.entry_date.date()
             exit_d = trade.exit_date.date() if trade.exit_date else None
             trade_info.append((key, trade.symbol.upper(), entry_d, exit_d))
+            screenshot_counts[key] = len(self.model.screenshots.get(key, []))
 
         for root, _, files in os.walk(folder):
             for fname in files:
@@ -3485,20 +3538,28 @@ class TradeJournalApp:
                     skipped_no_symbol += 1
                     continue
 
-                matched = False
+                symbol_upper = symbol.upper()
+                candidates: List[tuple] = []
                 for trade_key, trade_symbol, entry_d, exit_d in trade_info:
-                    if trade_symbol != symbol.upper():
+                    if trade_symbol != symbol_upper:
                         continue
                     if shot_date != entry_d and (exit_d is None or shot_date != exit_d):
                         continue
-                    if self._attach_screenshot_to_trade(trade_key, full_path, os.path.basename(fname), existing_abs):
-                        added += 1
-                    else:
-                        skipped_duplicate += 1
-                    matched = True
-                    break  # Attach to first matching trade
-                if not matched:
+                    candidates.append(trade_key)
+
+                if not candidates:
                     skipped_no_match += 1
+                    continue
+
+                # Pick the matching trade with the fewest screenshots so far (balances multi-lot days)
+                candidates.sort(key=lambda k: (screenshot_counts.get(k, 0), k))
+                target_key = candidates[0]
+
+                if self._attach_screenshot_to_trade(target_key, full_path, os.path.basename(fname)):
+                    added += 1
+                    screenshot_counts[target_key] = screenshot_counts.get(target_key, 0) + 1
+                else:
+                    skipped_duplicate += 1
 
         # Refresh UI if current selection changed
         current_selection = self.tree.selection()
@@ -4825,6 +4886,29 @@ class TradeJournalApp:
             # Plot line with gradient fill
             self.ax.plot(dates_dt, y_values, linewidth=2.5, color='#1f77b4', label='Cumulative P&L', zorder=3)
             self.ax.fill_between(dates_dt, y_values, alpha=0.25, color='#1f77b4', zorder=2)
+
+            # Interactive hover tooltip for date + equity value (requires mplcursors)
+            try:
+                import mplcursors
+                import matplotlib.dates as mdates
+
+                # Remove old cursor to avoid stacking listeners
+                if getattr(self, '_eq_cursor', None):
+                    try:
+                        self._eq_cursor.remove()
+                    except Exception:
+                        pass
+
+                self._eq_cursor = mplcursors.cursor(self.ax.lines, hover=True)
+
+                @self._eq_cursor.connect("add")
+                def _show_equity_annotation(sel):
+                    x_val, y_val = sel.target
+                    date_str = mdates.num2date(x_val).date().isoformat()
+                    sel.annotation.set_text(f"{date_str}\n$ {y_val:,.0f}")
+                    sel.annotation.get_bbox_patch().set(fc="white", ec="#1f77b4", alpha=0.9)
+            except Exception:
+                pass
             
             # Styling
             self.ax.set_xlabel('Date', fontsize=11, fontweight='bold', color='#333333')
