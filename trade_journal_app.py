@@ -1518,9 +1518,6 @@ class TradeJournalApp:
         # Button to bulk scan screenshots from a folder
         scan_ss_btn = ttk.Button(right_scrollable_frame, text="Scan Screenshot Folder", command=self.scan_screenshot_folder)
         scan_ss_btn.pack(anchor="w", pady=(0, 0))
-        # Button to view screenshots in a zoomed window
-        view_ss_btn = ttk.Button(right_scrollable_frame, text="View/Remove Screenshots", command=self.view_screenshots)
-        view_ss_btn.pack(anchor="w", pady=(0, 5))
         # Label to display screenshot count
         ttk.Label(right_scrollable_frame, text="Screenshots:").pack(anchor="w", pady=(10, 0))
         self.screenshot_var = tk.StringVar(value="")
@@ -1528,7 +1525,10 @@ class TradeJournalApp:
         self.screenshot_label.pack(anchor="w")
         # Image preview label (for displaying the screenshot)
         self.screenshot_preview_label = ttk.Label(right_scrollable_frame)
-        self.screenshot_preview_label.pack(anchor="w", pady=(5, 0))
+        self.screenshot_preview_label.pack(anchor="w", pady=(5, 5))
+        # Button to view screenshots in a zoomed window (placed directly under preview)
+        view_ss_btn = ttk.Button(right_scrollable_frame, text="View/Remove Screenshots", command=self.view_screenshots)
+        view_ss_btn.pack(anchor="w", pady=(0, 8))
 
         # Buttons to view price charts (stacked vertically)
         button_frame = ttk.Frame(right_scrollable_frame)
@@ -3371,12 +3371,19 @@ class TradeJournalApp:
         return symbol, date
 
     def _attach_screenshot_to_trade(self, trade_key: tuple, filepath: str, label: str) -> bool:
-        """Attach screenshot to a trade unless that trade already has it (per-trade dedupe)."""
+        """Attach screenshot to a trade unless that trade already has it (per-trade dedupe by path or filename)."""
         stored_path = self._make_screenshot_path_relative(filepath)
+        new_base = os.path.basename(stored_path).lower()
         if trade_key not in self.model.screenshots:
             self.model.screenshots[trade_key] = []
-        if any(s.get("filepath") == stored_path for s in self.model.screenshots[trade_key]):
-            return False
+        for s in self.model.screenshots[trade_key]:
+            existing_path = s.get("filepath", "")
+            if not existing_path:
+                continue
+            if existing_path == stored_path:
+                return False
+            if os.path.basename(existing_path).lower() == new_base:
+                return False
         self.model.screenshots[trade_key].append({"filepath": stored_path, "label": label})
         return True
 
