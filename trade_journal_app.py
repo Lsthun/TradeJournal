@@ -3546,7 +3546,7 @@ class TradeJournalApp:
                     continue
 
                 symbol_upper = symbol.upper()
-                candidates: List[Tuple[tuple, bool]] = []  # (trade_key, is_exit_match)
+                candidates: List[Tuple[tuple, bool, bool]] = []  # (trade_key, is_entry_match, is_exit_match)
                 for trade_key, trade_symbol, entry_d, exit_d in trade_info:
                     if trade_symbol != symbol_upper:
                         continue
@@ -3554,13 +3554,13 @@ class TradeJournalApp:
                     is_entry_match = shot_date == entry_d
                     if not (is_entry_match or is_exit_match):
                         continue
-                    candidates.append((trade_key, is_exit_match))
+                    candidates.append((trade_key, is_entry_match, is_exit_match))
 
                 if not candidates:
                     skipped_no_match += 1
                     continue
 
-                # Prefer exit-date matches, then fewer screenshots (balances multi-lot days)
+                # Prefer entry-date matches, then fewer screenshots (balances multi-lot days)
                 candidates.sort(key=lambda item: (0 if item[1] else 1, screenshot_counts.get(item[0], 0), item[0]))
                 target_key = candidates[0][0]
 
