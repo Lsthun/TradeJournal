@@ -1515,6 +1515,9 @@ class TradeJournalApp:
         # Button to add screenshot
         add_ss_btn = ttk.Button(right_scrollable_frame, text="Add Screenshot", command=self.add_screenshot)
         add_ss_btn.pack(anchor="w", pady=(5, 0))
+        # Button to bulk scan screenshots from a folder
+        scan_ss_btn = ttk.Button(right_scrollable_frame, text="Scan Screenshot Folder", command=self.scan_screenshot_folder)
+        scan_ss_btn.pack(anchor="w", pady=(0, 0))
         # Button to view screenshots in a zoomed window
         view_ss_btn = ttk.Button(right_scrollable_frame, text="View/Remove Screenshots", command=self.view_screenshots)
         view_ss_btn.pack(anchor="w", pady=(0, 5))
@@ -3259,6 +3262,72 @@ class TradeJournalApp:
             pass
         return filepath
     
+    def _collect_existing_screenshot_paths(self) -> Set[str]:
+        """Return a set of absolute paths for all attached screenshots (dedupe guard)."""
+        existing: Set[str] = set()
+        for entries in self.model.screenshots.values():
+            for s in entries:
+                resolved = self._resolve_screenshot_path(s.get("filepath", ""))
+                existing.add(os.path.abspath(resolved))
+        return existing
+
+    def _parse_screenshot_filename(self, filename: str, full_path: str) -> Tuple[Optional[str], dt.date]:
+        """Extract symbol and date from filename; fall back to file modified date for date.
+
+        Expected patterns include SYMBOL_YYYY-MM-DD_HHMM or SYMBOLYYYYMMDD.*
+        Symbol is taken as the leading alphabetic token. Date formats supported: YYYY-MM-DD,
+        YYYYMMDD, MM-DD-YYYY, MMDDYYYY. If no date is found, use file modified date.
+        """
+        base = os.path.splitext(os.path.basename(filename))[0]
+        tokens = re.split(r'[^A-Za-z0-9]+', base)
+        symbol: Optional[str] = None
+        if tokens and tokens[0].isalpha():
+            symbol = tokens[0].upper()
+
+        date: Optional[dt.date] = None
+        # Try date patterns in order
+        date_patterns = [
+            r'(20\d{2})[-_ ]?(\d{2})[-_ ]?(\d{2})',      # YYYY-MM-DD or YYYYMMDD
+            r'(\d{2})[-_ ]?(\d{2})[-_ ]?(20\d{2})',      # MM-DD-YYYY or MMDDYYYY
+        ]
+        for pat in date_patterns:
+            m = re.search(pat, base)
+            if not m:
+                continue
+            try:
+                if pat.startswith('('):
+                    if len(m.groups()) == 3:
+                        g1, g2, g3 = m.groups()
+                        if pat.startswith('(20'):  # YYYY-MM-DD
+                            y, mm, dd = int(g1), int(g2), int(g3)
+                        else:  # MM-DD-YYYY
+                            mm, dd, y = int(g1), int(g2), int(g3)
+                        date = dt.date(y, mm, dd)
+                        break
+            except Exception:
+                continue
+        if date is None:
+            try:
+                ts = os.path.getmtime(full_path)
+                date = dt.datetime.fromtimestamp(ts).date()
+            except Exception:
+                date = dt.date.today()
+        return symbol, date
+
+    def _attach_screenshot_to_trade(self, trade_key: tuple, filepath: str, label: str, existing_abs: Set[str]) -> bool:
+        """Attach screenshot if not already attached to this or any trade. Updates existing_abs."""
+        resolved_abs = os.path.abspath(filepath)
+        if resolved_abs in existing_abs:
+            return False
+        stored_path = self._make_screenshot_path_relative(filepath)
+        if trade_key not in self.model.screenshots:
+            self.model.screenshots[trade_key] = []
+        if any(s.get("filepath") == stored_path for s in self.model.screenshots[trade_key]):
+            return False
+        self.model.screenshots[trade_key].append({"filepath": stored_path, "label": label})
+        existing_abs.add(resolved_abs)
+        return True
+
     def add_screenshot(self) -> None:
         """Add a screenshot file to the selected trade with optional label and notes."""
         selected = self.tree.selection()
@@ -3374,6 +3443,77 @@ class TradeJournalApp:
         
         ttk.Button(button_frame, text="Add Screenshot", command=lambda: (save_on_close(), preview_win.destroy())).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=cancel_it).pack(side=tk.LEFT, padx=5)
+
+    def scan_screenshot_folder(self) -> None:
+        """Scan a folder for chart screenshots and auto-attach to trades by symbol and date.
+
+        Rules:
+        - Symbol comes from the leading token in the filename (letters only, uppercased).
+        - Date comes from the filename (YYYY-MM-DD / YYYYMMDD / MM-DD-YYYY / MMDDYYYY);
+          if missing, falls back to file modified date.
+        - Matches trades on same symbol (case-insensitive) and same entry or exit date.
+        - Avoids attaching a screenshot already attached anywhere (global dedupe).
+        """
+        folder = filedialog.askdirectory(title="Select screenshot folder to scan")
+        if not folder:
+            return
+
+        exts = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
+        existing_abs = self._collect_existing_screenshot_paths()
+
+        added = 0
+        skipped_duplicate = 0
+        skipped_no_symbol = 0
+        skipped_no_match = 0
+
+        # Precompute trade keys and dates for matching
+        trade_info: List[Tuple[tuple, str, dt.date, Optional[dt.date]]] = []
+        for trade in self.model.trades:
+            key = self.model.compute_key(trade)
+            entry_d = trade.entry_date.date()
+            exit_d = trade.exit_date.date() if trade.exit_date else None
+            trade_info.append((key, trade.symbol.upper(), entry_d, exit_d))
+
+        for root, _, files in os.walk(folder):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in exts:
+                    continue
+                full_path = os.path.abspath(os.path.join(root, fname))
+                symbol, shot_date = self._parse_screenshot_filename(fname, full_path)
+                if not symbol:
+                    skipped_no_symbol += 1
+                    continue
+
+                matched = False
+                for trade_key, trade_symbol, entry_d, exit_d in trade_info:
+                    if trade_symbol != symbol.upper():
+                        continue
+                    if shot_date != entry_d and (exit_d is None or shot_date != exit_d):
+                        continue
+                    if self._attach_screenshot_to_trade(trade_key, full_path, os.path.basename(fname), existing_abs):
+                        added += 1
+                    else:
+                        skipped_duplicate += 1
+                    matched = True
+                    break  # Attach to first matching trade
+                if not matched:
+                    skipped_no_match += 1
+
+        # Refresh UI if current selection changed
+        current_selection = self.tree.selection()
+        if current_selection:
+            self.on_tree_select(None)
+
+        messagebox.showinfo(
+            "Scan Complete",
+            (
+                f"Added: {added}\n"
+                f"Skipped duplicates: {skipped_duplicate}\n"
+                f"Skipped (no symbol in name): {skipped_no_symbol}\n"
+                f"Skipped (no matching trade on that date): {skipped_no_match}"
+            ),
+        )
     
     def _update_screenshot_preview(self, filepath: str) -> None:
         """Load and display a preview of the given screenshot."""
