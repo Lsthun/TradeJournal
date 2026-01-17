@@ -4041,6 +4041,14 @@ class TradeJournalApp:
         - Balances attachments across matching trades by choosing the trade with the fewest screenshots
           so far (per-trade dedupe only).
         """
+        # Remember selection so we can restore focus after refreshing the table
+        selected_key = None
+        selected_item = None
+        current_selection = self.tree.selection()
+        if current_selection:
+            selected_item = current_selection[0]
+            selected_key = self.id_to_key.get(selected_item)
+
         folder = filedialog.askdirectory(title="Select screenshot folder to scan")
         if not folder:
             return
@@ -4097,9 +4105,25 @@ class TradeJournalApp:
                 else:
                     skipped_duplicate += 1
 
-        # Refresh UI if current selection changed
-        current_selection = self.tree.selection()
-        if current_selection:
+        # Rebuild the table so screenshot indicators update immediately
+        self.populate_table()
+
+        # Restore the previously selected trade if possible
+        if selected_key is not None:
+            for iid, key in self.id_to_key.items():
+                if key == selected_key:
+                    self.tree.selection_set(iid)
+                    self.tree.focus(iid)
+                    self.tree.see(iid)
+                    break
+        elif selected_item:
+            # If a non-trade row was selected, keep the first row highlighted for continuity
+            children = self.tree.get_children("")
+            if children:
+                self.tree.selection_set(children[0])
+                self.tree.focus(children[0])
+
+        if self.tree.selection():
             self.on_tree_select(None)
 
         messagebox.showinfo(
