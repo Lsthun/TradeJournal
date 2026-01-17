@@ -529,8 +529,9 @@ class TradeJournalModel:
         # Screenshots keyed by unique trade key (list of dicts with filepath and label)
         # Format: {key: [{"filepath": "path", "label": "description"}, ...]}
         self.screenshots: Dict[tuple, List[Dict[str, str]]] = {}
-        # Set of unique transaction keys to detect duplicates across sessions
-        # Each key is a tuple of (run_date, account_number, symbol, quantity, price, amount)
+        # Set of unique transaction keys to detect duplicates across sessions.
+        # Keys are stored as tuples: (run_date or run_date.date(), account_number, symbol, quantity, price, amount, action)
+        # We store both datetime and date-only variants to tolerate files that omit times while still reducing false positives.
         self.seen_tx_keys: set = set()
 
         # Track duplicate transactions encountered when loading a new CSV.  Each element
@@ -647,9 +648,16 @@ class TradeJournalModel:
         # Clear previous duplicate records
         self.duplicate_transactions.clear()
         self.duplicate_count = 0
-        # Capture keys from prior sessions to detect duplicates across sessions
-        # Keys are stored using date-only run_date to tolerate re-exports with different times
+        # Capture keys from prior sessions (persisted) **and** currently loaded transactions
+        # Keys use both datetime and date-only run_date to tolerate files with/without times
         existing_keys = set(self.seen_tx_keys)
+        for tx in self.transactions:
+            k_dt = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
+            existing_keys.add(k_dt)
+            if isinstance(tx.run_date, dt.datetime):
+                existing_keys.add((tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action))
+        # Ensure we persist the unified key set for future sessions
+        self.seen_tx_keys.update(existing_keys)
         new_keys: set = set()
         try:
             with open(filepath, newline="", encoding="utf-8-sig") as f:
@@ -739,19 +747,21 @@ class TradeJournalModel:
                         amount=amount,
                         settlement_date=settlement_date,
                     )
-                    # Compute duplicate keys
-                    key_date = (run_date.date(), acct_num, symbol, qty, price, amount)
-                    key_dt = (run_date, acct_num, symbol, qty, price, amount)
-                    # Check duplicates both across sessions and within this load; tolerate older datetime-style keys
-                    if key_date in existing_keys or key_dt in existing_keys or key_date in new_keys or key_dt in new_keys:
+                    # Compute duplicate keys (datetime and date-only)
+                    key_dt = (run_date, acct_num, symbol, qty, price, amount, action)
+                    key_date = (run_date.date(), acct_num, symbol, qty, price, amount, action)
+                    # Check duplicates both across sessions and within this load
+                    if (key_dt in existing_keys or key_date in existing_keys or
+                        key_dt in new_keys or key_date in new_keys):
                         self.duplicate_transactions.append(tx)
                         self.duplicate_count += 1
                         continue
-                    # Accept this transaction and record key for this file (store date-only for consistency)
+                    # Accept this transaction and record keys for this file (store both variants)
+                    new_keys.add(key_dt)
                     new_keys.add(key_date)
                     self.transactions.append(tx)
             # Finished reading file
-            # Update global seen keys with new keys from this import (date-only form)
+            # Update global seen keys with new keys from this import
             self.seen_tx_keys.update(new_keys)
         except Exception as e:
             raise RuntimeError(f"Failed to load CSV: {e}")
@@ -798,13 +808,25 @@ class TradeJournalModel:
             self.entry_strategies = data.get('entry_strategies', {})
             self.exit_strategies = data.get('exit_strategies', {})
             self.seen_tx_keys = data.get('seen_tx_keys', set())
-            # Normalize seen_tx_keys to use date-only run_date (handles older datetime-stored keys)
+            # Normalize seen_tx_keys to include action and both datetime/date variants for robustness
             normalized_keys = set()
             for k in self.seen_tx_keys:
-                if isinstance(k, tuple) and len(k) == 6:
-                    run_date_part = k[0]
-                    run_date_norm = run_date_part.date() if isinstance(run_date_part, dt.datetime) else run_date_part
-                    normalized_keys.add((run_date_norm, k[1], k[2], k[3], k[4], k[5]))
+                if not isinstance(k, tuple):
+                    continue
+                if len(k) >= 6:
+                    run_part = k[0]
+                    acct = k[1]
+                    sym = k[2]
+                    qty = k[3]
+                    price = k[4]
+                    amt = k[5]
+                    action = k[6] if len(k) >= 7 else None
+                    base_tuple = (run_part, acct, sym, qty, price, amt, action)
+                    normalized_keys.add(base_tuple)
+                    if isinstance(run_part, dt.datetime):
+                        normalized_keys.add((run_part.date(), acct, sym, qty, price, amt, action))
+                    elif isinstance(run_part, dt.date):
+                        normalized_keys.add((run_part, acct, sym, qty, price, amt, action))
             self.seen_tx_keys = normalized_keys
             
             # Migrate old screenshot format (string) to new format (list of dicts)
@@ -1136,6 +1158,20 @@ class TradeJournalApp:
         self.exit_text_default_height = 3
         self.entry_text_height = tk.IntVar(value=self.entry_text_default_height)
         self.exit_text_height = tk.IntVar(value=self.exit_text_default_height)
+        # Symbol filter (comma-separated list) needs to exist before building UI
+        self.symbol_filter_var = tk.StringVar(value="")
+        # Analysis state
+        self.analysis_top_n_var = tk.StringVar(value="10")
+        self.analysis_min_trades_var = tk.StringVar(value="20")
+        self.analysis_closed_only_var = tk.BooleanVar(value=True)
+        self.analysis_attribution_var = tk.StringVar(value="Split")
+        self.analysis_sort_entry_var = tk.StringVar(value="Total PnL")
+        self.analysis_sort_exit_var = tk.StringVar(value="Total PnL")
+        self.analysis_sort_combo_var = tk.StringVar(value="Total PnL")
+        self.analysis_date_mode_var = tk.StringVar(value="Exit Date")
+        self.analysis_include_unspecified_var = tk.BooleanVar(value=False)
+        self.analysis_start_date_var = tk.StringVar(value="")
+        self.analysis_end_date_var = tk.StringVar(value="")
         # UI elements
         self._build_ui()
         # Sorting state: which column and whether descending
@@ -1145,6 +1181,7 @@ class TradeJournalApp:
         self.id_to_key: Dict[str, tuple] = {}
         # Mapping from group row id to list of trade indices (used for deletion)
         self.group_id_to_indices: Dict[str, List[int]] = {}
+        self._analysis_selected: Optional[Tuple[str, dict]] = None
         # Date filter boundaries (dt.date objects)
         self.start_date: Optional[dt.date] = None
         self.end_date: Optional[dt.date] = None
@@ -1181,7 +1218,7 @@ class TradeJournalApp:
         self.top_controls_frame = top_frame
         
         # Make all columns expand equally to use available space
-        for i in range(8):
+        for i in range(11):
             top_frame.columnconfigure(i, weight=1)
 
         # Row 0: Main action buttons
@@ -1195,23 +1232,26 @@ class TradeJournalApp:
         add_tx_btn = ttk.Button(top_frame, text="Add Transaction", command=self.add_transaction_dialog)
         add_tx_btn.grid(row=0, column=2, padx=(0, 5), pady=2)
 
+        # Button to edit selected transaction
+        edit_tx_btn = ttk.Button(top_frame, text="Edit Transaction", command=self.edit_selected_transaction)
+        edit_tx_btn.grid(row=0, column=3, padx=(0, 5), pady=2)
+
         # Button to delete selected transactions
         del_selected_btn = ttk.Button(top_frame, text="Delete Selected", command=self.delete_selected_transactions)
-        del_selected_btn.grid(row=0, column=3, padx=(0, 5), pady=2)
+        del_selected_btn.grid(row=0, column=4, padx=(0, 5), pady=2)
 
         # Button to clear the entire journal
         clear_btn = ttk.Button(top_frame, text="Clear Journal", command=self.clear_journal)
-        clear_btn.grid(row=0, column=4, padx=(0, 5), pady=2)
+        clear_btn.grid(row=0, column=5, padx=(0, 5), pady=2)
 
         # Account filter on row 0
-        ttk.Label(top_frame, text="Filter Account:").grid(row=0, column=5, padx=(5, 2), pady=2)
+        ttk.Label(top_frame, text="Filter Account:").grid(row=0, column=6, padx=(5, 2), pady=2)
         self.account_var = tk.StringVar(value="all")
         self.account_dropdown = ttk.Combobox(top_frame, textvariable=self.account_var, state="readonly", width=15)
-        self.account_dropdown.grid(row=0, column=6, padx=(0, 5), pady=2)
+        self.account_dropdown.grid(row=0, column=7, padx=(0, 5), pady=2)
         self.account_dropdown.bind("<<ComboboxSelected>>", self.on_account_filter_change)
 
-        sync_alerts_btn = ttk.Button(top_frame, text="Sync Alerts", command=self.sync_alerts_to_entry_strategies)
-        sync_alerts_btn.grid(row=0, column=7, padx=(0, 5), pady=2)
+        # Sync Alerts moved next to chart toggle on row 4
 
         # Row 1: Group toggle + Top N filter controls
         self.group_var = tk.BooleanVar(value=True)
@@ -1313,6 +1353,21 @@ class TradeJournalApp:
         self.table_visible = tk.BooleanVar(value=True)
         self.toggle_btn = ttk.Button(top_frame, text="Hide Table", command=self.toggle_table_visibility)
         self.toggle_btn.grid(row=4, column=7, padx=(0, 5), pady=2, sticky="w")
+        self.chart_visible = tk.BooleanVar(value=True)
+        self.toggle_chart_btn = ttk.Button(top_frame, text="Hide Chart", command=self.toggle_chart_visibility)
+        self.toggle_chart_btn.grid(row=4, column=8, padx=(0, 5), pady=2, sticky="w")
+
+        sync_alerts_btn = ttk.Button(top_frame, text="Sync Alerts", command=self.sync_alerts_to_entry_strategies)
+        sync_alerts_btn.grid(row=4, column=9, padx=(0, 5), pady=2, sticky="w")
+
+        # Row 5: Symbol filter (comma-separated, apply via button or Enter)
+        ttk.Label(top_frame, text="Filter Symbol(s):").grid(row=5, column=0, padx=(0, 2), pady=2, sticky="e")
+        symbol_entry = ttk.Entry(top_frame, textvariable=self.symbol_filter_var, width=22)
+        symbol_entry.grid(row=5, column=1, columnspan=2, padx=(0, 5), pady=2, sticky="ew")
+        symbol_entry.bind("<Return>", lambda e: self.apply_symbol_filter())
+        apply_symbol_btn = ttk.Button(top_frame, text="Apply →", command=self.apply_symbol_filter)
+        apply_symbol_btn.grid(row=5, column=3, padx=(0, 5), pady=2, sticky="w")
+        ttk.Label(top_frame, text="Use commas: SPY,QQQ").grid(row=5, column=4, columnspan=3, padx=(0, 5), pady=2, sticky="w")
 
         # Main frame with notebook (tabs)
         main_frame = ttk.Frame(self.root)
@@ -1321,15 +1376,22 @@ class TradeJournalApp:
         # Create notebook for tabs
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # TAB 1: Journal (original content)
         journal_frame = ttk.Frame(self.notebook)
         self.notebook.add(journal_frame, text="Journal")
+        self.journal_tab = journal_frame
 
         # TAB 2: Charts
         chart_frame = ttk.Frame(self.notebook)
         self.notebook.add(chart_frame, text="Charts")
         self._build_chart_tab(chart_frame)
+
+        # TAB 3: Analysis
+        analysis_frame = ttk.Frame(self.notebook)
+        self.notebook.add(analysis_frame, text="Analysis")
+        self._build_analysis_tab(analysis_frame)
 
         # Build journal tab content using existing layout structure
         self._build_journal_tab(journal_frame)
@@ -1617,6 +1679,426 @@ class TradeJournalApp:
         self.chart_trades_tree.configure(yscrollcommand=vsb.set)
         self.chart_trades_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=2)
         vsb.pack(side=tk.RIGHT, fill="y")
+
+    def _build_analysis_tab(self, parent_frame: ttk.Frame) -> None:
+        parent_frame.columnconfigure(0, weight=1)
+        parent_frame.rowconfigure(1, weight=1)
+        parent_frame.rowconfigure(2, weight=1)
+        controls = ttk.LabelFrame(parent_frame, text="Filters")
+        controls.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        for i in range(6):
+            controls.columnconfigure(i, weight=1)
+
+        ttk.Label(controls, text="Account:").grid(row=0, column=0, padx=2, pady=2, sticky="e")
+        self.analysis_account_var = tk.StringVar(value="all")
+        self.analysis_account_combo = ttk.Combobox(controls, textvariable=self.analysis_account_var, state="readonly", width=15)
+        self.analysis_account_combo.grid(row=0, column=1, padx=2, pady=2, sticky="w")
+        self.analysis_account_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_analysis_view())
+
+        ttk.Label(controls, text="Start Date:").grid(row=0, column=2, padx=2, pady=2, sticky="e")
+        ttk.Entry(controls, textvariable=self.analysis_start_date_var, width=12).grid(row=0, column=3, padx=2, pady=2, sticky="w")
+        ttk.Label(controls, text="End Date:").grid(row=0, column=4, padx=2, pady=2, sticky="e")
+        ttk.Entry(controls, textvariable=self.analysis_end_date_var, width=12).grid(row=0, column=5, padx=2, pady=2, sticky="w")
+
+        ttk.Label(controls, text="Top N:").grid(row=1, column=0, padx=2, pady=2, sticky="e")
+        ttk.Entry(controls, textvariable=self.analysis_top_n_var, width=6).grid(row=1, column=1, padx=2, pady=2, sticky="w")
+        ttk.Label(controls, text="Min Trades:").grid(row=1, column=2, padx=2, pady=2, sticky="e")
+        ttk.Entry(controls, textvariable=self.analysis_min_trades_var, width=6).grid(row=1, column=3, padx=2, pady=2, sticky="w")
+
+        ttk.Checkbutton(controls, text="Closed only", variable=self.analysis_closed_only_var, command=self.refresh_analysis_view).grid(row=1, column=4, padx=2, pady=2, sticky="w")
+        ttk.Checkbutton(controls, text="Include Unspecified", variable=self.analysis_include_unspecified_var, command=self.refresh_analysis_view).grid(row=1, column=5, padx=2, pady=2, sticky="w")
+
+        ttk.Label(controls, text="Attribution:").grid(row=2, column=0, padx=2, pady=2, sticky="e")
+        attrib_combo = ttk.Combobox(controls, textvariable=self.analysis_attribution_var, state="readonly", values=["Split", "Full", "Primary"], width=10)
+        attrib_combo.grid(row=2, column=1, padx=2, pady=2, sticky="w")
+        attrib_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_analysis_view())
+
+        ttk.Label(controls, text="Date Mode:").grid(row=2, column=2, padx=2, pady=2, sticky="e")
+        date_combo = ttk.Combobox(controls, textvariable=self.analysis_date_mode_var, state="readonly", values=["Exit Date", "Entry Date"], width=12)
+        date_combo.grid(row=2, column=3, padx=2, pady=2, sticky="w")
+        date_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_analysis_view())
+
+        ttk.Label(controls, text="Sort Entry by:").grid(row=3, column=0, padx=2, pady=2, sticky="e")
+        ttk.Label(controls, text="Sort Exit by:").grid(row=3, column=2, padx=2, pady=2, sticky="e")
+        ttk.Label(controls, text="Sort Combo by:").grid(row=3, column=4, padx=2, pady=2, sticky="e")
+        sort_choices = ["Total PnL", "Avg PnL", "Win Rate", "Profit Factor", "Expectancy", "Trades", "Avg Hold"]
+        entry_sort = ttk.Combobox(controls, textvariable=self.analysis_sort_entry_var, state="readonly", values=sort_choices, width=12)
+        exit_sort = ttk.Combobox(controls, textvariable=self.analysis_sort_exit_var, state="readonly", values=sort_choices, width=12)
+        combo_sort = ttk.Combobox(controls, textvariable=self.analysis_sort_combo_var, state="readonly", values=sort_choices, width=12)
+        entry_sort.grid(row=3, column=1, padx=2, pady=2, sticky="w")
+        exit_sort.grid(row=3, column=3, padx=2, pady=2, sticky="w")
+        combo_sort.grid(row=3, column=5, padx=2, pady=2, sticky="w")
+        for widget in (entry_sort, exit_sort, combo_sort):
+            widget.bind("<<ComboboxSelected>>", lambda e: self.refresh_analysis_view())
+
+        refresh_btn = ttk.Button(controls, text="Refresh", command=self.refresh_analysis_view)
+        refresh_btn.grid(row=4, column=5, padx=2, pady=4, sticky="e")
+
+        trees_frame = ttk.Frame(parent_frame)
+        trees_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        trees_frame.columnconfigure(0, weight=1)
+        trees_frame.columnconfigure(1, weight=1)
+        trees_frame.rowconfigure(0, weight=1)
+        trees_frame.rowconfigure(1, weight=1)
+
+        entry_frame, self.analysis_entry_tree = self._create_analysis_tree(trees_frame, "Entry Strategies")
+        exit_frame, self.analysis_exit_tree = self._create_analysis_tree(trees_frame, "Exit Strategies")
+        combo_frame, self.analysis_combo_tree = self._create_analysis_tree(trees_frame, "Entry -> Exit Combos")
+        entry_frame.grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
+        exit_frame.grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
+        combo_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=3, pady=3)
+
+        detail_frame = ttk.LabelFrame(parent_frame, text="Details")
+        detail_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
+        detail_frame.columnconfigure(0, weight=1)
+        self.analysis_detail_text = tk.Text(detail_frame, height=6, wrap="word", state="disabled")
+        self.analysis_detail_text.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        ttk.Button(detail_frame, text="Filter Journal to this Strategy", command=self._filter_journal_from_analysis).grid(row=1, column=0, sticky="e", padx=2, pady=2)
+
+    def _create_analysis_tree(self, parent: ttk.Frame, title: str) -> Tuple[ttk.LabelFrame, ttk.Treeview]:
+        frame = ttk.LabelFrame(parent, text=title)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        cols = ("rank", "name", "trades", "total_pnl", "avg_pnl", "win_rate", "profit_factor", "expectancy", "avg_hold")
+        headings = {
+            "rank": "#",
+            "name": "Strategy",
+            "trades": "Trades",
+            "total_pnl": "Total PnL",
+            "avg_pnl": "Avg PnL",
+            "win_rate": "Win %",
+            "profit_factor": "PF",
+            "expectancy": "Expectancy",
+            "avg_hold": "Avg Hold (d)",
+        }
+        tree = ttk.Treeview(frame, columns=cols, show="headings", height=8, selectmode="browse")
+        for c in cols:
+            anchor = tk.E if c != "name" else tk.W
+            tree.heading(c, text=headings[c])
+            tree.column(c, width=90 if c != "name" else 180, anchor=anchor, stretch=True)
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        tree.bind("<<TreeviewSelect>>", self._on_analysis_select)
+        return frame, tree
+
+    def _on_tab_changed(self, event: tk.Event) -> None:
+        try:
+            tab_text = self.notebook.tab(self.notebook.select(), "text")
+            if tab_text == "Analysis" and hasattr(self, "analysis_account_combo"):
+                self.refresh_analysis_accounts()
+                self.refresh_analysis_view()
+        except Exception:
+            pass
+
+    def refresh_analysis_accounts(self) -> None:
+        acct_numbers = sorted({tx.account_number for tx in self.model.transactions})
+        values = ["all"] + acct_numbers
+        self.analysis_account_combo["values"] = values
+        if self.analysis_account_var.get() not in values:
+            self.analysis_account_var.set("all")
+
+    def _parse_strategy_tags(self, raw: str) -> List[str]:
+        tokens = [re.sub(r"\s+", " ", t.strip()) for t in (raw or "").split(",")]
+        return [t for t in tokens if t]
+
+    def _analysis_date_bounds(self) -> Tuple[Optional[dt.date], Optional[dt.date]]:
+        start = self.analysis_start_date_var.get().strip()
+        end = self.analysis_end_date_var.get().strip()
+        start_date = None
+        end_date = None
+        if start:
+            try:
+                start_date = self._parse_date_input(start)
+            except Exception:
+                messagebox.showwarning("Invalid Date", "Start date is not recognized.")
+                return None, None
+        if end:
+            try:
+                end_date = self._parse_date_input(end)
+            except Exception:
+                messagebox.showwarning("Invalid Date", "End date is not recognized.")
+                return None, None
+        if start_date and end_date and start_date > end_date:
+            messagebox.showwarning("Invalid Range", "Start date cannot be after end date for Analysis.")
+            return None, None
+        return start_date, end_date
+
+    def _filtered_trades_for_analysis(self) -> List[Tuple[int, TradeEntry, str, str]]:
+        start_date, end_date = self._analysis_date_bounds()
+        account_filter = self.analysis_account_var.get()
+        closed_only = self.analysis_closed_only_var.get()
+        date_mode_exit = self.analysis_date_mode_var.get() == "Exit Date"
+        include_unspec = self.analysis_include_unspecified_var.get()
+        trades: List[Tuple[int, TradeEntry, str, str]] = []
+        for idx, trade in enumerate(self.model.trades):
+            if closed_only and not trade.exit_date:
+                continue
+            if account_filter != "all" and trade.account_number != account_filter:
+                continue
+            if date_mode_exit:
+                if not trade.exit_date:
+                    continue
+                d = trade.exit_date.date()
+            else:
+                d = trade.entry_date.date()
+            if start_date and d < start_date:
+                continue
+            if end_date and d > end_date:
+                continue
+            key = self.model.compute_key(trade)
+            entry_raw = self.model.entry_strategies.get(key, trade.entry_strategy or "")
+            exit_raw = self.model.exit_strategies.get(key, trade.exit_strategy or "")
+            entry_tags = self._parse_strategy_tags(entry_raw)
+            exit_tags = self._parse_strategy_tags(exit_raw)
+            if include_unspec:
+                if not entry_tags:
+                    entry_tags = ["Unspecified"]
+                if not exit_tags:
+                    exit_tags = ["Unspecified"]
+            trades.append((idx, trade, ", ".join(entry_tags), ", ".join(exit_tags)))
+        return trades
+
+    def refresh_analysis_view(self) -> None:
+        try:
+            top_n = int(self.analysis_top_n_var.get() or 0)
+        except ValueError:
+            top_n = 10
+            self.analysis_top_n_var.set("10")
+        try:
+            min_trades = int(self.analysis_min_trades_var.get() or 0)
+        except ValueError:
+            min_trades = 20
+            self.analysis_min_trades_var.set("20")
+        attrib = self.analysis_attribution_var.get()
+        include_unspec = self.analysis_include_unspecified_var.get()
+        trades = self._filtered_trades_for_analysis()
+        entry_data = self._compute_strategy_leaderboard(trades, group_type="entry", top_n=top_n, min_trades=min_trades, attribution=attrib, include_unspecified=include_unspec, sort_by=self.analysis_sort_entry_var.get())
+        exit_data = self._compute_strategy_leaderboard(trades, group_type="exit", top_n=top_n, min_trades=min_trades, attribution=attrib, include_unspecified=include_unspec, sort_by=self.analysis_sort_exit_var.get())
+        combo_data = self._compute_strategy_leaderboard(trades, group_type="combo", top_n=top_n, min_trades=min_trades, attribution=attrib, include_unspecified=include_unspec, sort_by=self.analysis_sort_combo_var.get())
+        self._populate_analysis_tree(self.analysis_entry_tree, entry_data)
+        self._populate_analysis_tree(self.analysis_exit_tree, exit_data)
+        self._populate_analysis_tree(self.analysis_combo_tree, combo_data)
+        self._analysis_selected = None
+        self._set_analysis_detail(None)
+
+    def _compute_strategy_leaderboard(self, trades: List[Tuple[int, TradeEntry, str, str]], *, group_type: str, top_n: int, min_trades: int, attribution: str, include_unspecified: bool, sort_by: str) -> List[dict]:
+        groups: Dict[str, dict] = {}
+
+        def add_contribution(key: str, display: str, contrib: float, trade_id: int, hold: Optional[int]):
+            g = groups.setdefault(key, {
+                "name": display,
+                "pnl": 0.0,
+                "wins": 0,
+                "losses": 0,
+                "breakeven": 0,
+                "trade_ids": set(),
+                "pos_sum": 0.0,
+                "neg_sum": 0.0,
+                "hold_sum": 0.0,
+                "hold_n": 0,
+            })
+            g["pnl"] += contrib
+            if contrib > 1e-8:
+                g["wins"] += 1
+                g["pos_sum"] += contrib
+            elif contrib < -1e-8:
+                g["losses"] += 1
+                g["neg_sum"] += contrib
+            else:
+                g["breakeven"] += 1
+            g["trade_ids"].add(trade_id)
+            if hold is not None:
+                g["hold_sum"] += hold
+                g["hold_n"] += 1
+
+        for idx, trade, entry_str, exit_str in trades:
+            if trade.pnl is None:
+                continue
+            entry_tags_raw = self._parse_strategy_tags(entry_str)
+            exit_tags_raw = self._parse_strategy_tags(exit_str)
+            entry_tags = [t.lower() for t in entry_tags_raw] or (["unspecified"] if include_unspecified else [])
+            exit_tags = [t.lower() for t in exit_tags_raw] or (["unspecified"] if include_unspecified else [])
+            entry_disp_map = {t.lower(): t for t in entry_tags_raw}
+            exit_disp_map = {t.lower(): t for t in exit_tags_raw}
+            pnl = trade.pnl
+            hold = trade.hold_period
+
+            if group_type == "entry":
+                if not entry_tags:
+                    continue
+                tags = entry_tags
+                if attribution == "Primary":
+                    tags = tags[:1]
+                denom = len(tags) if attribution == "Split" and len(tags) > 0 else 1
+                contrib_base = pnl / denom if denom else pnl
+                for t in tags:
+                    add_contribution(t, entry_disp_map.get(t, t.title()), contrib_base if attribution != "Full" else pnl, idx, hold)
+            elif group_type == "exit":
+                if not exit_tags:
+                    continue
+                tags = exit_tags
+                if attribution == "Primary":
+                    tags = tags[:1]
+                denom = len(tags) if attribution == "Split" and len(tags) > 0 else 1
+                contrib_base = pnl / denom if denom else pnl
+                for t in tags:
+                    add_contribution(t, exit_disp_map.get(t, t.title()), contrib_base if attribution != "Full" else pnl, idx, hold)
+            else:
+                if not entry_tags or not exit_tags:
+                    continue
+                e_tags = entry_tags[:1] if attribution == "Primary" else entry_tags
+                x_tags = exit_tags[:1] if attribution == "Primary" else exit_tags
+                denom = (len(e_tags) * len(x_tags)) if attribution == "Split" and e_tags and x_tags else 1
+                contrib_base = pnl / denom if denom else pnl
+                for e_tag in e_tags:
+                    for x_tag in x_tags:
+                        combo_key = f"{e_tag} -> {x_tag}"
+                        display = f"{entry_disp_map.get(e_tag, e_tag.title())} -> {exit_disp_map.get(x_tag, x_tag.title())}"
+                        add_contribution(combo_key, display, contrib_base if attribution != "Full" else pnl, idx, hold)
+
+        rows: List[dict] = []
+        for key, g in groups.items():
+            trade_count = len(g["trade_ids"])
+            if trade_count < min_trades:
+                continue
+            pos_sum = g["pos_sum"]
+            neg_sum = g["neg_sum"]
+            wins = g["wins"]
+            losses = g["losses"]
+            total = g["pnl"]
+            avg_pnl = total / trade_count if trade_count else 0.0
+            win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
+            pf = float("inf") if neg_sum == 0 and pos_sum > 0 else (pos_sum / abs(neg_sum) if neg_sum < 0 else 0.0)
+            avg_hold = (g["hold_sum"] / g["hold_n"]) if g["hold_n"] > 0 else None
+            avg_win = pos_sum / wins if wins > 0 else 0.0
+            avg_loss_abs = abs(neg_sum) / losses if losses > 0 else 0.0
+            expectancy = win_rate * avg_win - (1 - win_rate) * avg_loss_abs
+            rows.append({
+                "key": key,
+                "name": g["name"],
+                "trades": trade_count,
+                "total_pnl": total,
+                "avg_pnl": avg_pnl,
+                "win_rate": win_rate,
+                "profit_factor": pf,
+                "expectancy": expectancy,
+                "avg_hold": avg_hold,
+                "wins": wins,
+                "losses": losses,
+                "breakeven": g["breakeven"],
+            })
+
+        def sort_key(row: dict):
+            metric = sort_by
+            if metric == "Avg PnL":
+                return row["avg_pnl"]
+            if metric == "Win Rate":
+                return row["win_rate"]
+            if metric == "Profit Factor":
+                return row["profit_factor"]
+            if metric == "Expectancy":
+                return row["expectancy"]
+            if metric == "Trades":
+                return row["trades"]
+            if metric == "Avg Hold":
+                return row["avg_hold"] if row["avg_hold"] is not None else float('-inf')
+            return row["total_pnl"]
+
+        rows.sort(key=sort_key, reverse=True)
+        return rows[:top_n] if top_n > 0 else rows
+
+    def _format_analysis_row(self, row: dict, rank: int) -> Tuple:
+        pf = row["profit_factor"]
+        pf_str = "∞" if pf == float('inf') else f"{pf:.2f}"
+        avg_hold = "" if row["avg_hold"] is None else f"{row['avg_hold']:.1f}"
+        return (
+            rank,
+            row["name"],
+            row["trades"],
+            f"{row['total_pnl']:.2f}",
+            f"{row['avg_pnl']:.2f}",
+            f"{row['win_rate']*100:.2f}%",
+            pf_str,
+            f"{row['expectancy']:.2f}",
+            avg_hold,
+        )
+
+    def _populate_analysis_tree(self, tree: ttk.Treeview, rows: List[dict]) -> None:
+        for item in tree.get_children():
+            tree.delete(item)
+        if not rows:
+            tree.insert("", "end", values=("-", "No strategies meet filters", "", "", "", "", "", "", ""))
+            tree._analysis_rows = {}  # type: ignore
+            return
+        for i, row in enumerate(rows, start=1):
+            tree.insert("", "end", iid=row["key"], values=self._format_analysis_row(row, i))
+        tree._analysis_rows = {r["key"]: r for r in rows}  # type: ignore
+
+    def _on_analysis_select(self, event: tk.Event) -> None:
+        widget: ttk.Treeview = event.widget  # type: ignore
+        rows = getattr(widget, "_analysis_rows", {})
+        sel = widget.selection()
+        if not sel:
+            self._set_analysis_detail(None)
+            self._analysis_selected = None
+            return
+        key = sel[0]
+        row = rows.get(key)
+        self._analysis_selected = (widget.master.cget("text"), row) if row else None
+        self._set_analysis_detail(row)
+
+    def _set_analysis_detail(self, row: Optional[dict]) -> None:
+        self.analysis_detail_text.configure(state="normal")
+        self.analysis_detail_text.delete("1.0", tk.END)
+        if not row:
+            self.analysis_detail_text.insert(tk.END, "Select a strategy to see details.")
+        else:
+            self.analysis_detail_text.insert(tk.END, (
+                f"Strategy: {row['name']}\n"
+                f"Trades: {row['trades']} (W {row['wins']} / L {row['losses']} / B {row['breakeven']})\n"
+                f"Total PnL: {row['total_pnl']:.2f}\n"
+                f"Avg PnL: {row['avg_pnl']:.2f}\n"
+                f"Win Rate: {row['win_rate']*100:.2f}%\n"
+                f"Profit Factor: {'∞' if row['profit_factor']==float('inf') else f'{row['profit_factor']:.2f}'}\n"
+                f"Expectancy: {row['expectancy']:.2f}\n"
+                f"Avg Hold: {row['avg_hold']:.1f if row['avg_hold'] is not None else 'n/a'}\n"
+            ))
+        self.analysis_detail_text.configure(state="disabled")
+
+    def _filter_journal_from_analysis(self) -> None:
+        sel = self._analysis_selected
+        if not sel or not sel[1]:
+            return
+        label, row = sel
+        name = row.get("name", "")
+        if label == "Entry Strategies":
+            self.entry_strategy_filter_var.set(name)
+            self.exit_strategy_filter_var.set("all")
+        elif label == "Exit Strategies":
+            self.exit_strategy_filter_var.set(name)
+            self.entry_strategy_filter_var.set("all")
+        else:
+            parts = name.split("->")
+            if len(parts) == 2:
+                self.entry_strategy_filter_var.set(parts[0].strip())
+                self.exit_strategy_filter_var.set(parts[1].strip())
+        acct = self.analysis_account_var.get()
+        self.account_var.set(acct if acct in self.account_dropdown["values"] else "all")
+        start_date, end_date = self._analysis_date_bounds()
+        if start_date:
+            self.start_date_var.set(self._format_date_preferred(start_date))
+        if end_date:
+            self.end_date_var.set(self._format_date_preferred(end_date))
+        self.closed_only_var.set(self.analysis_closed_only_var.get())
+        self.apply_date_filter()
+        self.populate_table()
+        self.update_summary_and_chart()
+        try:
+            self.notebook.select(self.journal_tab)
+        except Exception:
+            pass
 
     def _auto_capitalize_symbol(self, event=None) -> None:
         """Auto-capitalize symbol input as user types."""
@@ -2369,11 +2851,19 @@ class TradeJournalApp:
         acct_numbers = sorted({tx.account_number for tx in self.model.transactions})
         self.account_dropdown["values"] = ["all"] + acct_numbers
         self.account_dropdown.set("all")
+        self.refresh_analysis_accounts()
         # Populate table and update summary
         self.populate_table()
         self.update_summary_and_chart()
         # Update chart tab symbol list
         self.update_chart_symbols()
+        # Build import results dialog (added first, then duplicates)
+        added_txs = self.model.transactions[prev_count:]
+        dupe_list = getattr(self.model, 'duplicate_transactions', [])
+        try:
+            self.show_import_results(added_txs, dupe_list)
+        except Exception:
+            pass
         # Inform user about duplicates
         try:
             if dupes:
@@ -2579,6 +3069,33 @@ class TradeJournalApp:
         self.populate_table()
         self.update_summary_and_chart()
 
+    def toggle_chart_visibility(self) -> None:
+        """Toggle the visibility of the equity curve pane."""
+        panes = list(self.left_paned.panes())
+        chart_id = str(self.chart_frame)
+        if self.chart_visible.get():
+            # Hide chart if present
+            if chart_id in panes:
+                try:
+                    self.left_paned.remove(self.chart_frame)
+                except Exception:
+                    pass
+            self.chart_visible.set(False)
+            self.toggle_chart_btn.config(text="Show Chart")
+        else:
+            # Show chart at the end if not already present
+            panes = list(self.left_paned.panes())
+            if chart_id not in panes:
+                try:
+                    self.left_paned.add(self.chart_frame, weight=1)
+                except Exception:
+                    pass
+            self.chart_visible.set(True)
+            self.toggle_chart_btn.config(text="Hide Chart")
+        # Redraw chart only when visible
+        if self.chart_visible.get():
+            self.update_summary_and_chart()
+
     def autofit_columns(self) -> None:
         """Auto-fit table columns to content width."""
         import tkinter.font as tkFont
@@ -2711,6 +3228,7 @@ class TradeJournalApp:
         group_by_symbol = self.group_var.get()
         entry_strategy_filter = self.entry_strategy_filter_var.get()
         exit_strategy_filter = self.exit_strategy_filter_var.get()
+        symbol_filter_tokens = self._parsed_symbol_filter()
         # Determine sort parameters
         sort_by = self.sort_by
         descending = self.sort_descending
@@ -2731,6 +3249,9 @@ class TradeJournalApp:
                     return False
             # Account filter
             if account_filter and account_filter != "all" and trade.account_number != account_filter:
+                return False
+            # Symbol filter (comma-separated tokens)
+            if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
                 return False
             # Entry strategy filter (supports partial matching and multiple strategies)
             if entry_strategy_filter and entry_strategy_filter != "all":
@@ -3202,26 +3723,30 @@ class TradeJournalApp:
             self.screenshot_preview_label.image = None
     
     def on_tree_double_click(self, event: tk.Event) -> None:
-        """Handle double-click on tree item to view screenshots if clicked on screenshot column."""
+        """Handle double-click: view screenshots on screenshot column, otherwise open edit dialog."""
         item_id = self.tree.identify("item", event.x, event.y)
         column = self.tree.identify("column", event.x, event.y)
         
         if not item_id or not column:
             return
         
-        # Check if clicked on screenshot column (column #11)
         # The columns are: account(#1), symbol(#2), entry_date(#3), entry_price(#4), 
         # exit_date(#5), exit_price(#6), quantity(#7), pnl(#8), pnl_pct(#9), hold_period(#10),
         # screenshot(#11), entry_strategy(#12), exit_strategy(#13), note(#14)
-        if column != "#11":
+        if column == "#11":
+            key = self.id_to_key.get(item_id)
+            if key is None:
+                return
+            if key in self.model.screenshots and self.model.screenshots[key]:
+                self.view_screenshots()
             return
-        
-        key = self.id_to_key.get(item_id)
-        if key is None:
-            return
-        
-        if key in self.model.screenshots and self.model.screenshots[key]:
-            self.view_screenshots()
+
+        # For non-screenshot columns, open edit dialog on a trade row
+        if item_id in self.id_to_key:
+            try:
+                self.edit_selected_transaction()
+            except Exception:
+                pass
 
     def _auto_save_fields(self) -> None:
         """Auto-save note and strategies whenever fields are modified."""
@@ -3267,7 +3792,9 @@ class TradeJournalApp:
     def _current_filter_state(self) -> dict:
         """Return current UI filter state for persistence."""
         return {
+            "account": self.account_var.get(),
             "account_filter": self.account_var.get(),
+            "symbol_filter": self.symbol_filter_var.get(),
             "start_date": self.start_date_var.get(),
             "end_date": self.end_date_var.get(),
             "exit_start_date": self.exit_start_date_var.get(),
@@ -3908,6 +4435,7 @@ class TradeJournalApp:
         dup_win = tk.Toplevel(self.root)
         dup_win.title("Duplicate Transactions")
         dup_win.geometry("600x300")
+        dup_win.bind("<Escape>", lambda e: dup_win.destroy())
         # Treeview to display duplicate transactions
         cols = ("run_date", "account_number", "symbol", "quantity", "price", "amount")
         tree = ttk.Treeview(dup_win, columns=cols, show="headings")
@@ -3935,6 +4463,57 @@ class TradeJournalApp:
         close_btn = ttk.Button(dup_win, text="Close", command=dup_win.destroy)
         close_btn.pack(pady=(0, 5))
 
+    def show_import_results(self, added: List[Transaction], duplicates: List[Transaction]) -> None:
+        """Display transactions added in the latest import along with any duplicates."""
+        if not added and not duplicates:
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Import Results")
+        win.geometry("750x350")
+        win.bind("<Escape>", lambda e: win.destroy())
+        cols = ("status", "run_date", "account_number", "symbol", "quantity", "price", "amount")
+        tree = ttk.Treeview(win, columns=cols, show="headings")
+        headers = {
+            "status": "Status",
+            "run_date": "Run Date",
+            "account_number": "Account Number",
+            "symbol": "Symbol",
+            "quantity": "Quantity",
+            "price": "Price",
+            "amount": "Amount",
+        }
+        widths = {
+            "status": 80,
+            "run_date": 140,
+            "account_number": 120,
+            "symbol": 90,
+            "quantity": 90,
+            "price": 80,
+            "amount": 90,
+        }
+        for col in cols:
+            tree.heading(col, text=headers[col])
+            tree.column(col, width=widths.get(col, 100), anchor=tk.CENTER if col == "status" else tk.W)
+        def insert_items(items: List[Transaction], status_label: str) -> None:
+            for idx, tx in enumerate(items):
+                run_date_str = tx.run_date.strftime("%Y-%m-%d %H:%M") if isinstance(tx.run_date, dt.datetime) else str(tx.run_date)
+                tree.insert("", "end", iid=f"{status_label}_{idx}", values=(
+                    status_label,
+                    run_date_str,
+                    tx.account_number,
+                    tx.symbol,
+                    f"{tx.quantity:.2f}",
+                    f"{tx.price:.2f}",
+                    f"{tx.amount:.2f}",
+                ))
+        insert_items(added, "Added")
+        insert_items(duplicates, "Duplicate")
+        tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 6))
+
     def add_transaction_dialog(self) -> None:
         """Open a dialog to allow the user to manually add a transaction.
 
@@ -3949,6 +4528,7 @@ class TradeJournalApp:
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Transaction")
         dialog.resizable(False, False)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
         # Fields for account number (combobox), symbol, action (buy/sell), quantity, price, date, time
         ttk.Label(dialog, text="Account Number:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
         acct_var = tk.StringVar()
@@ -4043,17 +4623,19 @@ class TradeJournalApp:
                 amount=amount,
                 settlement_date=None,
             )
-            # Compute duplicate key using date-only run_date for consistency with CSV imports
-            key = (tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount)
+            # Compute duplicate keys (datetime and date-only) including action
+            key_dt = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
+            key_date = (tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
             # Check if duplicate across sessions (using model.seen_tx_keys). If so, ignore.
-            if key in self.model.seen_tx_keys:
+            if key_dt in self.model.seen_tx_keys or key_date in self.model.seen_tx_keys:
                 messagebox.showinfo("Duplicate", "This transaction already exists in the journal and will be ignored.")
                 dialog.destroy()
                 return
             # Otherwise, add to model
             self.model.transactions.append(tx)
             # Record this key so future imports consider it existing
-            self.model.seen_tx_keys.add(key)
+            self.model.seen_tx_keys.add(key_dt)
+            self.model.seen_tx_keys.add(key_date)
             # Re-match trades
             self.model.reset_matching()
             self.model._match_trades()
@@ -4074,6 +4656,7 @@ class TradeJournalApp:
                     'group_by_symbol': self.group_var.get(),
                     'start_date': self.start_date_var.get(),
                     'end_date': self.end_date_var.get(),
+                    'symbol_filter': self.symbol_filter_var.get(),
                 }
                 self.model.save_state(self.persist_path, filter_state)
             except Exception:
@@ -4084,6 +4667,258 @@ class TradeJournalApp:
         submit_btn.grid(row=7, column=0, columnspan=2, pady=(10, 5))
         cancel_btn = ttk.Button(dialog, text="Cancel", command=dialog.destroy)
         cancel_btn.grid(row=7, column=2, pady=(10, 5))
+
+    def edit_selected_transaction(self) -> None:
+        """Edit the underlying transaction(s) for the selected trade row."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("No Selection", "Select a single trade row to edit.")
+            return
+        if len(selected) > 1:
+            messagebox.showinfo("Multiple Selections", "Please edit one trade at a time.")
+            return
+        item_id = selected[0]
+        if item_id.startswith("g"):
+            messagebox.showinfo("Group Selected", "Expand the group and select a specific trade to edit.")
+            return
+        try:
+            trade_index = int(item_id)
+        except ValueError:
+            messagebox.showinfo("Invalid Selection", "Could not resolve the selected trade.")
+            return
+        if trade_index < 0 or trade_index >= len(self.model.trades):
+            messagebox.showinfo("Invalid Selection", "Could not resolve the selected trade.")
+            return
+        trade = self.model.trades[trade_index]
+
+        def find_tx(target_dt: dt.datetime, price: float, want_buy: bool) -> Optional[Transaction]:
+            for tx in self.model.transactions:
+                if bool(tx.is_buy) != want_buy:
+                    continue
+                if tx.account_number != trade.account_number or tx.symbol != trade.symbol:
+                    continue
+                if abs((tx.run_date - target_dt).total_seconds()) > 1e-6:
+                    continue
+                if abs(tx.price - price) > 1e-8:
+                    continue
+                if abs(tx.quantity) + 1e-8 < abs(trade.quantity):
+                    continue
+                return tx
+            return None
+
+        entry_tx = find_tx(trade.entry_date, trade.entry_price, True)
+        exit_tx = None
+        if trade.exit_date and trade.exit_price is not None:
+            exit_tx = find_tx(trade.exit_date, trade.exit_price, False)
+        if entry_tx is None:
+            messagebox.showwarning("Not Found", "Could not locate the entry transaction for this trade.")
+            return
+        if trade.exit_date and trade.exit_price is not None and exit_tx is None:
+            messagebox.showwarning("Not Found", "Could not locate the exit transaction for this trade.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Transaction")
+        dialog.resizable(False, False)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+        ttk.Label(dialog, text="Entry (Buy)", font=("TkDefaultFont", 10, "bold")).grid(row=0, column=0, columnspan=3, padx=5, pady=(8, 2), sticky="w")
+        entry_acct_var = tk.StringVar(value=entry_tx.account_number)
+        entry_symbol_var = tk.StringVar(value=entry_tx.symbol)
+        entry_action_var = tk.StringVar(value=entry_tx.action or "")
+        entry_qty_var = tk.StringVar(value=f"{abs(entry_tx.quantity):.6g}")
+        entry_price_var = tk.StringVar(value=f"{entry_tx.price:.6g}")
+        entry_date_var = tk.StringVar(value=entry_tx.run_date.strftime("%Y-%m-%d"))
+        entry_time_str = entry_tx.run_date.strftime("%H:%M") if entry_tx.run_date.time() != dt.time(0, 0) else ""
+        entry_time_var = tk.StringVar(value=entry_time_str)
+
+        ttk.Label(dialog, text="Account Number:").grid(row=1, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_acct_var).grid(row=1, column=1, padx=5, pady=2)
+        ttk.Label(dialog, text="Symbol:").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_symbol_var).grid(row=2, column=1, padx=5, pady=2)
+        ttk.Label(dialog, text="Action Text:").grid(row=3, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_action_var).grid(row=3, column=1, padx=5, pady=2)
+        ttk.Label(dialog, text="Quantity:").grid(row=4, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_qty_var).grid(row=4, column=1, padx=5, pady=2)
+        ttk.Label(dialog, text="Price:").grid(row=5, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_price_var).grid(row=5, column=1, padx=5, pady=2)
+        ttk.Label(dialog, text="Date (M/D/YYYY ok):").grid(row=6, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_date_var).grid(row=6, column=1, padx=5, pady=2)
+        ttk.Label(dialog, text="Time (HH:MM 24h):").grid(row=7, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=entry_time_var).grid(row=7, column=1, padx=5, pady=2)
+
+        exit_section_row = 8
+        if exit_tx:
+            ttk.Label(dialog, text="Exit (Sell)", font=("TkDefaultFont", 10, "bold")).grid(row=exit_section_row, column=0, columnspan=3, padx=5, pady=(10, 2), sticky="w")
+            exit_acct_var = tk.StringVar(value=exit_tx.account_number)
+            exit_symbol_var = tk.StringVar(value=exit_tx.symbol)
+            exit_action_var = tk.StringVar(value=exit_tx.action or "")
+            exit_qty_var = tk.StringVar(value=f"{abs(exit_tx.quantity):.6g}")
+            exit_price_var = tk.StringVar(value=f"{exit_tx.price:.6g}")
+            exit_date_var = tk.StringVar(value=exit_tx.run_date.strftime("%Y-%m-%d"))
+            exit_time_str = exit_tx.run_date.strftime("%H:%M") if exit_tx.run_date.time() != dt.time(0, 0) else ""
+            exit_time_var = tk.StringVar(value=exit_time_str)
+
+            ttk.Label(dialog, text="Account Number:").grid(row=exit_section_row + 1, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_acct_var).grid(row=exit_section_row + 1, column=1, padx=5, pady=2)
+            ttk.Label(dialog, text="Symbol:").grid(row=exit_section_row + 2, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_symbol_var).grid(row=exit_section_row + 2, column=1, padx=5, pady=2)
+            ttk.Label(dialog, text="Action Text:").grid(row=exit_section_row + 3, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_action_var).grid(row=exit_section_row + 3, column=1, padx=5, pady=2)
+            ttk.Label(dialog, text="Quantity:").grid(row=exit_section_row + 4, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_qty_var).grid(row=exit_section_row + 4, column=1, padx=5, pady=2)
+            ttk.Label(dialog, text="Price:").grid(row=exit_section_row + 5, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_price_var).grid(row=exit_section_row + 5, column=1, padx=5, pady=2)
+            ttk.Label(dialog, text="Date (M/D/YYYY ok):").grid(row=exit_section_row + 6, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_date_var).grid(row=exit_section_row + 6, column=1, padx=5, pady=2)
+            ttk.Label(dialog, text="Time (HH:MM 24h):").grid(row=exit_section_row + 7, column=0, sticky="e", padx=5, pady=2)
+            ttk.Entry(dialog, textvariable=exit_time_var).grid(row=exit_section_row + 7, column=1, padx=5, pady=2)
+
+        def parse_dt(date_text: str, time_text: str, label: str) -> dt.datetime:
+            try:
+                date_obj = self._parse_date_input(date_text, label=label)
+            except ValueError:
+                raise
+            if date_obj is None:
+                raise ValueError(f"{label} is required")
+            time_text = (time_text or "").strip()
+            if time_text:
+                try:
+                    time_obj = dt.datetime.strptime(time_text, "%H:%M").time()
+                except ValueError:
+                    messagebox.showwarning("Invalid Time", f"{label} time must be HH:MM in 24-hour format.")
+                    raise
+            else:
+                time_obj = dt.time()
+            return dt.datetime.combine(date_obj, time_obj)
+
+        def signed_amount(price_val: float, qty_val: float, old_amount: float) -> float:
+            base = abs(price_val * qty_val)
+            if old_amount < 0:
+                return -base
+            if old_amount > 0:
+                return base
+            return price_val * qty_val
+
+        def apply_changes() -> None:
+            try:
+                new_entry_dt = parse_dt(entry_date_var.get(), entry_time_var.get(), "Entry date")
+                new_entry_qty_abs = float(entry_qty_var.get())
+                if new_entry_qty_abs <= 0:
+                    raise ValueError("Entry quantity must be positive")
+                new_entry_price = float(entry_price_var.get())
+            except ValueError as e:
+                if "Entry" in str(e):
+                    messagebox.showwarning("Invalid Entry", str(e))
+                else:
+                    messagebox.showwarning("Invalid Entry", "Entry fields must be valid numbers and dates.")
+                return
+
+            entry_action = (entry_action_var.get() or entry_tx.action or "Entry").strip()
+            entry_qty = new_entry_qty_abs if entry_tx.is_buy else -new_entry_qty_abs
+            entry_amount = signed_amount(new_entry_price, entry_qty, entry_tx.amount)
+
+            exit_action = None
+            exit_qty = None
+            exit_price = None
+            new_exit_dt = None
+            if exit_tx:
+                try:
+                    new_exit_dt = parse_dt(exit_date_var.get(), exit_time_var.get(), "Exit date")
+                    new_exit_qty_abs = float(exit_qty_var.get())
+                    if new_exit_qty_abs <= 0:
+                        raise ValueError("Exit quantity must be positive")
+                    exit_price = float(exit_price_var.get())
+                except ValueError as e:
+                    if "Exit" in str(e):
+                        messagebox.showwarning("Invalid Exit", str(e))
+                    else:
+                        messagebox.showwarning("Invalid Exit", "Exit fields must be valid numbers and dates.")
+                    return
+                exit_action = (exit_action_var.get() or exit_tx.action or "Exit").strip()
+                exit_qty = new_exit_qty_abs if exit_tx.is_buy else -new_exit_qty_abs
+                exit_amount = signed_amount(exit_price, exit_qty, exit_tx.amount)
+            else:
+                exit_amount = None
+
+            old_entry_keys = {
+                (entry_tx.run_date, entry_tx.account_number, entry_tx.symbol, entry_tx.quantity, entry_tx.price, entry_tx.amount, entry_tx.action),
+                (entry_tx.run_date.date(), entry_tx.account_number, entry_tx.symbol, entry_tx.quantity, entry_tx.price, entry_tx.amount, entry_tx.action),
+            }
+            old_exit_keys: Set[tuple] = set()
+            if exit_tx:
+                old_exit_keys = {
+                    (exit_tx.run_date, exit_tx.account_number, exit_tx.symbol, exit_tx.quantity, exit_tx.price, exit_tx.amount, exit_tx.action),
+                    (exit_tx.run_date.date(), exit_tx.account_number, exit_tx.symbol, exit_tx.quantity, exit_tx.price, exit_tx.amount, exit_tx.action),
+                }
+
+            new_entry_keys = {
+                (new_entry_dt, entry_acct_var.get().strip(), entry_symbol_var.get().strip().upper(), entry_qty, new_entry_price, entry_amount, entry_action),
+                (new_entry_dt.date(), entry_acct_var.get().strip(), entry_symbol_var.get().strip().upper(), entry_qty, new_entry_price, entry_amount, entry_action),
+            }
+            new_exit_keys: Set[tuple] = set()
+            if exit_tx and exit_qty is not None and exit_price is not None and new_exit_dt is not None and exit_amount is not None:
+                new_exit_keys = {
+                    (new_exit_dt, exit_acct_var.get().strip(), exit_symbol_var.get().strip().upper(), exit_qty, exit_price, exit_amount, exit_action),
+                    (new_exit_dt.date(), exit_acct_var.get().strip(), exit_symbol_var.get().strip().upper(), exit_qty, exit_price, exit_amount, exit_action),
+                }
+
+            existing_keys = set(self.model.seen_tx_keys)
+            existing_keys.difference_update(old_entry_keys)
+            existing_keys.difference_update(old_exit_keys)
+            if any(k in existing_keys for k in new_entry_keys):
+                messagebox.showwarning("Duplicate", "The edited entry would duplicate an existing transaction.")
+                return
+            if new_exit_keys and any(k in existing_keys for k in new_exit_keys):
+                messagebox.showwarning("Duplicate", "The edited exit would duplicate an existing transaction.")
+                return
+
+            # Apply edits to transactions
+            entry_tx.run_date = new_entry_dt
+            entry_tx.account = entry_acct_var.get().strip()
+            entry_tx.account_number = entry_acct_var.get().strip()
+            entry_tx.symbol = entry_symbol_var.get().strip().upper()
+            entry_tx.action = entry_action
+            entry_tx.price = new_entry_price
+            entry_tx.quantity = entry_qty
+            entry_tx.amount = entry_amount
+
+            if exit_tx and new_exit_keys:
+                exit_tx.run_date = new_exit_dt  # type: ignore
+                exit_tx.account = exit_acct_var.get().strip()
+                exit_tx.account_number = exit_acct_var.get().strip()
+                exit_tx.symbol = exit_symbol_var.get().strip().upper()
+                exit_tx.action = exit_action
+                exit_tx.price = exit_price  # type: ignore
+                exit_tx.quantity = exit_qty  # type: ignore
+                exit_tx.amount = exit_amount  # type: ignore
+
+            # Update seen transaction keys (remove old, add new)
+            self.model.seen_tx_keys.difference_update(old_entry_keys)
+            self.model.seen_tx_keys.difference_update(old_exit_keys)
+            self.model.seen_tx_keys.update(new_entry_keys)
+            self.model.seen_tx_keys.update(new_exit_keys)
+
+            # Preserve metadata, rematch, and restore metadata
+            metadata_map = self.model._save_trade_metadata_before_matching()
+            self.model.reset_matching()
+            self.model._match_trades()
+            self.model._restore_trade_metadata_after_matching(metadata_map)
+
+            # Refresh UI and persisted state
+            acct_numbers = sorted({tx.account_number for tx in self.model.transactions})
+            self.account_dropdown["values"] = ["all"] + acct_numbers
+            if self.account_var.get() not in ["all"] + acct_numbers:
+                self.account_var.set("all")
+            self.populate_table()
+            self.update_summary_and_chart()
+            self.update_chart_symbols()
+            self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+            dialog.destroy()
+
+        button_row = exit_section_row + (8 if exit_tx else 0)
+        ttk.Button(dialog, text="Save Changes", command=apply_changes).grid(row=button_row, column=0, padx=5, pady=(12, 8), sticky="e")
+        ttk.Button(dialog, text="Cancel", command=dialog.destroy).grid(row=button_row, column=1, padx=5, pady=(12, 8), sticky="w")
 
     def delete_selected_transactions(self) -> None:
         """Delete the selected trade entries and their underlying transactions.
@@ -4157,13 +4992,16 @@ class TradeJournalApp:
         # Remove transactions matching these keys
         new_transactions: List[Transaction] = []
         for tx in self.model.transactions:
-            k = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount)
-            if k not in tx_keys_to_remove:
+            k6 = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount)
+            if k6 not in tx_keys_to_remove:
                 new_transactions.append(tx)
         # Replace transactions list
         self.model.transactions = new_transactions
         # Remove corresponding keys from seen_tx_keys
-        self.model.seen_tx_keys = {k for k in self.model.seen_tx_keys if k not in tx_keys_to_remove}
+        self.model.seen_tx_keys = {
+            k for k in self.model.seen_tx_keys
+            if not (isinstance(k, tuple) and len(k) >= 6 and (k[0], k[1], k[2], k[3], k[4], k[5]) in tx_keys_to_remove)
+        }
         # Remove notes and screenshots for deleted trades
         for key in unique_keys:
             self.model.notes.pop(key, None)
@@ -4188,6 +5026,7 @@ class TradeJournalApp:
                 'group_by_symbol': self.group_var.get(),
                 'start_date': self.start_date_var.get(),
                 'end_date': self.end_date_var.get(),
+                'symbol_filter': self.symbol_filter_var.get(),
             }
             self.model.save_state(self.persist_path, filter_state)
         except Exception:
@@ -4272,12 +5111,16 @@ class TradeJournalApp:
         candidates: List[Tuple[int, TradeEntry]] = []
         account_filter = self.account_var.get()
         closed_only = self.closed_only_var.get()
+        symbol_filter_tokens = self._parsed_symbol_filter()
         for idx, trade in enumerate(self.model.trades):
             # Only consider trades with an exit date (closed) and a P&L value
             if not trade.is_closed or trade.pnl is None:
                 continue
             # Account filter
             if account_filter and account_filter != "all" and trade.account_number != account_filter:
+                continue
+            # Symbol filter
+            if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
                 continue
             # Date range filter on entry_date (inclusive)
             if self.start_date and trade.entry_date.date() < self.start_date:
@@ -4338,6 +5181,7 @@ class TradeJournalApp:
                     self.end_date_var.set(filter_state.get('end_date', ''))
                     self.exit_start_date_var.set(filter_state.get('exit_start_date', ''))
                     self.exit_end_date_var.set(filter_state.get('exit_end_date', ''))
+                    self.symbol_filter_var.set(filter_state.get('symbol_filter', ''))
                     self.entry_strategy_filter_var.set(filter_state.get('entry_strategy_filter', 'all'))
                     self.exit_strategy_filter_var.set(filter_state.get('exit_strategy_filter', 'all'))
                     # Apply date filter if dates were set
@@ -4372,6 +5216,7 @@ class TradeJournalApp:
                 'end_date': self.end_date_var.get(),
                     'exit_start_date': self.exit_start_date_var.get(),
                     'exit_end_date': self.exit_end_date_var.get(),
+                'symbol_filter': self.symbol_filter_var.get(),
                 'entry_strategy_filter': self.entry_strategy_filter_var.get(),
                 'exit_strategy_filter': self.exit_strategy_filter_var.get(),
                 'chart_symbol': self.chart_symbol_var.get(),
@@ -4461,6 +5306,17 @@ class TradeJournalApp:
         """Return date as M/D/YYYY (no zero padding) for display consistency."""
         return f"{date_obj.month}/{date_obj.day}/{date_obj.year}"
 
+    def _parsed_symbol_filter(self) -> Set[str]:
+        """Return uppercase symbol tokens from the symbol filter entry."""
+        raw = self.symbol_filter_var.get() or ""
+        tokens = [tok.strip().upper() for tok in re.split(r"[,\s]+", raw) if tok.strip()]
+        return set(tokens)
+
+    def apply_symbol_filter(self) -> None:
+        """Apply symbol filter and refresh table/summary."""
+        self.populate_table()
+        self.update_summary_and_chart()
+
     def clear_filters(self) -> None:
         """Reset all filter settings to their defaults and refresh the display.
 
@@ -4490,6 +5346,8 @@ class TradeJournalApp:
         # Reset account filter to all
         self.account_var.set("all")
         self.account_dropdown.set("all")
+        # Reset symbol filter
+        self.symbol_filter_var.set("")
         # Refresh table and summary/chart
         self.populate_table()
         self.update_summary_and_chart()
@@ -4517,6 +5375,7 @@ class TradeJournalApp:
                 super().__init__(parent)
                 self.title("Select Date")
                 self.resizable(False, False)
+                self.bind("<Escape>", lambda e: self.destroy())
                 self.var = var
                 # Determine initial month/year from existing value or current date
                 current = parse_date(var.get()) or dt.date.today()
@@ -4615,7 +5474,14 @@ class TradeJournalApp:
             self._date_picker_window = None
             self._date_picker_allowed_widgets.clear()
             return
-        focus_widget = picker.focus_get()
+        try:
+            focus_widget = picker.focus_get()
+        except (KeyError, tk.TclError):
+            # Focus resolution may fail if widgets are being destroyed
+            picker.destroy()
+            self._date_picker_window = None
+            self._date_picker_allowed_widgets.clear()
+            return
         # If nothing focused inside picker, close it
         if focus_widget is None:
             picker.destroy()
@@ -4712,6 +5578,7 @@ class TradeJournalApp:
         exit_strategy_filter = self.exit_strategy_filter_var.get()
         exit_start_date = getattr(self, "exit_start_date", None)
         exit_end_date = getattr(self, "exit_end_date", None)
+        symbol_filter_tokens = self._parsed_symbol_filter()
         # Check for top filter
         top_set = getattr(self, 'top_filter_set', None)
         
@@ -4730,9 +5597,10 @@ class TradeJournalApp:
         
         # Check if any strategy filter is active
         has_strategy_filter = (entry_strategy_filter and entry_strategy_filter != "all") or (exit_strategy_filter and exit_strategy_filter != "all")
+        has_symbol_filter = bool(symbol_filter_tokens)
         
         # Determine summary - always compute manually if strategy filters are active or top_set is present
-        if top_set is None and not has_strategy_filter:
+        if top_set is None and not has_strategy_filter and not has_symbol_filter:
             summary = self.model.compute_summary(account_filter, closed_only=closed_only,
                                                  start_date=self.start_date, end_date=self.end_date,
                                                  exit_start_date=exit_start_date, exit_end_date=exit_end_date)
@@ -4755,6 +5623,9 @@ class TradeJournalApp:
                     continue
                 # Strategy filters
                 if not matches_strategy_filters(trade):
+                    continue
+                # Symbol filter
+                if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
                     continue
                 # Only consider CLOSED trades (fully exited lots) with status == "CLOSED"
                 if not trade.is_closed:
@@ -4849,7 +5720,7 @@ class TradeJournalApp:
             )
         self.summary_var.set(summary_text)
         # Compute equity curve DataFrame
-        if top_set is None and not has_strategy_filter:
+        if top_set is None and not has_strategy_filter and not has_symbol_filter:
             eq_df = self.model.equity_curve(account_filter, closed_only=closed_only,
                                              start_date=self.start_date, end_date=self.end_date,
                                              exit_start_date=exit_start_date, exit_end_date=exit_end_date)
@@ -4861,6 +5732,9 @@ class TradeJournalApp:
                     continue
                 # Strategy filters
                 if not matches_strategy_filters(trade):
+                    continue
+                # Symbol filter
+                if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
                     continue
                 if not trade.is_closed or trade.exit_date is None or trade.pnl is None:
                     continue
