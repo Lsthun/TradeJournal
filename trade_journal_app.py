@@ -1580,6 +1580,9 @@ class TradeJournalApp:
         # Button to bulk scan screenshots from a folder
         scan_ss_btn = ttk.Button(right_scrollable_frame, text="Scan Screenshot Folder", command=self.scan_screenshot_folder)
         scan_ss_btn.pack(anchor="w", pady=(0, 0))
+        # Button to bulk scan note text files from a folder
+        scan_notes_btn = ttk.Button(right_scrollable_frame, text="Scan Notes Folder", command=self.scan_notes_folder)
+        scan_notes_btn.pack(anchor="w", pady=(0, 0))
         # Label to display screenshot count
         ttk.Label(right_scrollable_frame, text="Screenshots:").pack(anchor="w", pady=(10, 0))
         self.screenshot_var = tk.StringVar(value="")
@@ -4135,6 +4138,134 @@ class TradeJournalApp:
                 f"Skipped (no matching trade on that date): {skipped_no_match}"
             ),
         )
+
+    def scan_notes_folder(self) -> None:
+        """Scan a folder for text note files and append them to matching trades by symbol and date.
+
+        Matching rules mirror screenshot parsing:
+        - Symbol comes from the leading token in the filename (letters only, uppercased).
+        - Date comes from the filename (YYYY-MM-DD / YYYYMMDD / MM-DD-YYYY / MMDDYYYY); if missing,
+          falls back to file modified date.
+        - A match occurs when the date equals a trade's entry date or exit date (if present) and the symbol matches.
+        - Notes are appended only if their text is not already present in the trade's existing notes.
+        """
+        # Preserve current selection to restore after table refresh
+        selected_key = None
+        selected_item = None
+        current_selection = self.tree.selection()
+        if current_selection:
+            selected_item = current_selection[0]
+            selected_key = self.id_to_key.get(selected_item)
+
+        folder = filedialog.askdirectory(title="Select notes folder to scan")
+        if not folder:
+            return
+
+        exts = {".txt"}
+        added = 0
+        skipped_no_symbol = 0
+        skipped_no_match = 0
+        skipped_empty = 0
+        skipped_duplicate = 0
+
+        # Precompute trade info for matching
+        trade_info: List[Tuple[tuple, str, dt.date, Optional[dt.date]]] = []
+        for trade in self.model.trades:
+            key = self.model.compute_key(trade)
+            entry_d = trade.entry_date.date()
+            exit_d = trade.exit_date.date() if trade.exit_date else None
+            trade_info.append((key, trade.symbol.upper(), entry_d, exit_d))
+
+        for root, _, files in os.walk(folder):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in exts:
+                    continue
+                full_path = os.path.abspath(os.path.join(root, fname))
+                symbol, note_date = self._parse_screenshot_filename(fname, full_path)
+                if not symbol:
+                    skipped_no_symbol += 1
+                    continue
+
+                symbol_upper = symbol.upper()
+                candidates: List[tuple] = []
+                for trade_key, trade_symbol, entry_d, exit_d in trade_info:
+                    if trade_symbol != symbol_upper:
+                        continue
+                    is_entry_match = note_date == entry_d
+                    is_exit_match = exit_d is not None and note_date == exit_d
+                    if not (is_entry_match or is_exit_match):
+                        continue
+                    candidates.append(trade_key)
+
+                if not candidates:
+                    skipped_no_match += 1
+                    continue
+
+                # Load note text
+                try:
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        note_text = f.read().strip()
+                except Exception:
+                    skipped_empty += 1
+                    continue
+
+                if not note_text:
+                    skipped_empty += 1
+                    continue
+
+                # Append note to each candidate trade, avoiding duplicates
+                for trade_key in candidates:
+                    existing = self.model.notes.get(trade_key, "") or ""
+                    if note_text and note_text in existing:
+                        skipped_duplicate += 1
+                        continue
+                    if existing.strip():
+                        new_note = existing.rstrip()
+                        if not new_note.endswith("\n"):
+                            new_note += "\n\n"
+                        new_note += note_text
+                    else:
+                        new_note = note_text
+                    self.model.notes[trade_key] = new_note
+                    added += 1
+
+        # Refresh table so notes column updates
+        self.populate_table()
+
+        # Restore previous selection if possible
+        if selected_key is not None:
+            for iid, key in self.id_to_key.items():
+                if key == selected_key:
+                    self.tree.selection_set(iid)
+                    self.tree.focus(iid)
+                    self.tree.see(iid)
+                    break
+        elif selected_item:
+            children = self.tree.get_children("")
+            if children:
+                self.tree.selection_set(children[0])
+                self.tree.focus(children[0])
+
+        if self.tree.selection():
+            self.on_tree_select(None)
+
+        # Persist updated notes
+        try:
+            self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+        except Exception:
+            pass
+
+        messagebox.showinfo(
+            "Scan Complete",
+            (
+                f"Notes appended: {added}\n"
+                f"Skipped (duplicate note text): {skipped_duplicate}\n"
+                f"Skipped (empty or unreadable file): {skipped_empty}\n"
+                f"Skipped (no symbol in name): {skipped_no_symbol}\n"
+                f"Skipped (no matching trade on that date): {skipped_no_match}"
+            ),
+        )
     
     def _update_screenshot_preview(self, filepath: str) -> None:
         """Load and display a preview of the given screenshot."""
@@ -4714,32 +4845,98 @@ class TradeJournalApp:
             messagebox.showinfo("Invalid Selection", "Could not resolve the selected trade.")
             return
         trade = self.model.trades[trade_index]
+        def looks_like_futures_symbol(sym: str) -> bool:
+            """Lightweight heuristic: futures tickers usually mix letters and digits."""
+            sym = (sym or "").upper()
+            has_alpha = any(c.isalpha() for c in sym)
+            has_digit = any(c.isdigit() for c in sym)
+            return has_alpha and has_digit
+
+        # Default to treating unmatched sells as missing buys; only assume short for futures-like symbols
+        entry_should_be_buy = True
+        if trade.buy_id < 0 and trade.exit_date is None and looks_like_futures_symbol(trade.symbol):
+            entry_should_be_buy = False
 
         def find_tx(target_dt: dt.datetime, price: float, want_buy: bool) -> Optional[Transaction]:
+            """Find a matching transaction for the trade.
+
+            Matching logic (best-first):
+            1) Exact datetime match (to the second) with price within tolerance.
+            2) Same calendar date (time-insensitive) with price within tolerance.
+            Always requires account, symbol, and sufficient quantity.
+            """
+            date_only = target_dt.date()
+            price_eps = max(0.01, abs(price) * 1e-3)  # allow small broker rounding
+            best: Optional[Tuple[int, float, Transaction]] = None  # (priority, price_delta, tx)
             for tx in self.model.transactions:
                 if bool(tx.is_buy) != want_buy:
                     continue
                 if tx.account_number != trade.account_number or tx.symbol != trade.symbol:
                     continue
-                if abs((tx.run_date - target_dt).total_seconds()) > 1e-6:
-                    continue
-                if abs(tx.price - price) > 1e-8:
-                    continue
                 if abs(tx.quantity) + 1e-8 < abs(trade.quantity):
                     continue
-                return tx
-            return None
+                price_delta = abs(tx.price - price)
+                if price_delta > price_eps:
+                    continue
 
-        entry_tx = find_tx(trade.entry_date, trade.entry_price, True)
+                priority = 0 if abs((tx.run_date - target_dt).total_seconds()) <= 1e-6 else 1 if tx.run_date.date() == date_only else 2
+                if priority == 2:
+                    continue
+                cand = (priority, price_delta, tx)
+                if best is None or cand < best:
+                    best = cand
+            return best[2] if best else None
+
+        entry_tx = find_tx(trade.entry_date, trade.entry_price, entry_should_be_buy)
         exit_tx = None
         if trade.exit_date and trade.exit_price is not None:
-            exit_tx = find_tx(trade.exit_date, trade.exit_price, False)
-        if entry_tx is None:
-            messagebox.showwarning("Not Found", "Could not locate the entry transaction for this trade.")
-            return
-        if trade.exit_date and trade.exit_price is not None and exit_tx is None:
-            messagebox.showwarning("Not Found", "Could not locate the exit transaction for this trade.")
-            return
+            exit_tx = find_tx(trade.exit_date, trade.exit_price, not entry_should_be_buy)
+
+        entry_placeholder = entry_tx is None
+        exit_placeholder = trade.exit_date is not None and trade.exit_price is not None and exit_tx is None
+
+        def _guess_amount(is_buy: bool, price_val: float, qty_abs: float) -> float:
+            base = abs(price_val * qty_abs)
+            return -base if is_buy else base
+
+        missing_parts = []
+        if entry_placeholder:
+            entry_qty_signed = abs(trade.quantity) if entry_should_be_buy else -abs(trade.quantity)
+            entry_amount_guess = _guess_amount(entry_should_be_buy, trade.entry_price, abs(trade.quantity))
+            entry_tx = Transaction(
+                run_date=trade.entry_date,
+                account=trade.account or trade.account_number,
+                account_number=trade.account_number,
+                symbol=trade.symbol,
+                action="Entry" if entry_should_be_buy else "Sell to Open",
+                price=trade.entry_price,
+                quantity=entry_qty_signed,
+                amount=entry_amount_guess,
+                settlement_date=None,
+            )
+            missing_parts.append("entry")
+        if exit_placeholder:
+            exit_qty_signed = -abs(trade.quantity) if entry_should_be_buy else abs(trade.quantity)
+            exit_amount_guess = _guess_amount(not entry_should_be_buy, trade.exit_price, abs(trade.quantity))  # type: ignore
+            exit_tx = Transaction(
+                run_date=trade.exit_date,  # type: ignore
+                account=trade.account or trade.account_number,
+                account_number=trade.account_number,
+                symbol=trade.symbol,
+                action="Exit" if entry_should_be_buy else "Buy to Cover",
+                price=trade.exit_price,  # type: ignore
+                quantity=exit_qty_signed,
+                amount=exit_amount_guess,
+                settlement_date=None,
+            )
+            missing_parts.append("exit")
+
+        if missing_parts:
+            parts_label = " and ".join(missing_parts)
+            messagebox.showwarning(
+                "Not Found",
+                f"Could not locate the {parts_label} transaction for this trade. The form is prefilled from the trade data; saving will create/update the missing side(s).",
+            )
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Edit Transaction")
@@ -4755,6 +4952,7 @@ class TradeJournalApp:
         entry_date_var = tk.StringVar(value=entry_tx.run_date.strftime("%Y-%m-%d"))
         entry_time_str = entry_tx.run_date.strftime("%H:%M") if entry_tx.run_date.time() != dt.time(0, 0) else ""
         entry_time_var = tk.StringVar(value=entry_time_str)
+        trade_key = self.model.compute_key(trade)
 
         ttk.Label(dialog, text="Account Number:").grid(row=1, column=0, sticky="e", padx=5, pady=2)
         ttk.Entry(dialog, textvariable=entry_acct_var).grid(row=1, column=1, padx=5, pady=2)
@@ -4771,7 +4969,22 @@ class TradeJournalApp:
         ttk.Label(dialog, text="Time (HH:MM 24h):").grid(row=7, column=0, sticky="e", padx=5, pady=2)
         ttk.Entry(dialog, textvariable=entry_time_var).grid(row=7, column=1, padx=5, pady=2)
 
-        exit_section_row = 8
+        # Entry/Exit strategies and trade note
+        entry_strategy_var = tk.StringVar(value=self.model.entry_strategies.get(trade_key, ""))
+        ttk.Label(dialog, text="Entry Strategy:").grid(row=8, column=0, sticky="e", padx=5, pady=(10, 2))
+        ttk.Entry(dialog, textvariable=entry_strategy_var).grid(row=8, column=1, padx=5, pady=(10, 2))
+
+        exit_strategy_var = tk.StringVar(value=self.model.exit_strategies.get(trade_key, ""))
+        ttk.Label(dialog, text="Exit Strategy:").grid(row=9, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(dialog, textvariable=exit_strategy_var).grid(row=9, column=1, padx=5, pady=2)
+
+        ttk.Label(dialog, text="Trade Note:").grid(row=10, column=0, sticky="ne", padx=5, pady=(10, 2))
+        note_text = tk.Text(dialog, width=40, height=6, wrap="word")
+        note_text.grid(row=10, column=1, columnspan=2, padx=5, pady=(10, 2), sticky="we")
+        existing_note = self.model.notes.get(trade_key, "")
+        note_text.insert("1.0", existing_note)
+
+        exit_section_row = 11
         if exit_tx:
             ttk.Label(dialog, text="Exit (Sell)", font=("TkDefaultFont", 10, "bold")).grid(row=exit_section_row, column=0, columnspan=3, padx=5, pady=(10, 2), sticky="w")
             exit_acct_var = tk.StringVar(value=exit_tx.account_number)
@@ -4865,12 +5078,14 @@ class TradeJournalApp:
             else:
                 exit_amount = None
 
-            old_entry_keys = {
-                (entry_tx.run_date, entry_tx.account_number, entry_tx.symbol, entry_tx.quantity, entry_tx.price, entry_tx.amount, entry_tx.action),
-                (entry_tx.run_date.date(), entry_tx.account_number, entry_tx.symbol, entry_tx.quantity, entry_tx.price, entry_tx.amount, entry_tx.action),
-            }
+            old_entry_keys: Set[tuple] = set()
+            if not entry_placeholder:
+                old_entry_keys = {
+                    (entry_tx.run_date, entry_tx.account_number, entry_tx.symbol, entry_tx.quantity, entry_tx.price, entry_tx.amount, entry_tx.action),
+                    (entry_tx.run_date.date(), entry_tx.account_number, entry_tx.symbol, entry_tx.quantity, entry_tx.price, entry_tx.amount, entry_tx.action),
+                }
             old_exit_keys: Set[tuple] = set()
-            if exit_tx:
+            if exit_tx and not exit_placeholder:
                 old_exit_keys = {
                     (exit_tx.run_date, exit_tx.account_number, exit_tx.symbol, exit_tx.quantity, exit_tx.price, exit_tx.amount, exit_tx.action),
                     (exit_tx.run_date.date(), exit_tx.account_number, exit_tx.symbol, exit_tx.quantity, exit_tx.price, exit_tx.amount, exit_tx.action),
@@ -4917,6 +5132,12 @@ class TradeJournalApp:
                 exit_tx.quantity = exit_qty  # type: ignore
                 exit_tx.amount = exit_amount  # type: ignore
 
+            # If we synthesized missing transactions, add them to the model now
+            if entry_placeholder and entry_tx not in self.model.transactions:
+                self.model.transactions.append(entry_tx)
+            if exit_placeholder and exit_tx and exit_tx not in self.model.transactions:
+                self.model.transactions.append(exit_tx)
+
             # Update seen transaction keys (remove old, add new)
             self.model.seen_tx_keys.difference_update(old_entry_keys)
             self.model.seen_tx_keys.difference_update(old_exit_keys)
@@ -4928,6 +5149,37 @@ class TradeJournalApp:
             self.model.reset_matching()
             self.model._match_trades()
             self.model._restore_trade_metadata_after_matching(metadata_map)
+
+            # Update strategies and notes on the rematched trade key
+            updated_key = None
+            for t in self.model.trades:
+                if (
+                    t.account_number == entry_acct_var.get().strip()
+                    and t.symbol == entry_symbol_var.get().strip().upper()
+                    and t.entry_date == new_entry_dt
+                    and abs(t.entry_price - new_entry_price) < 1e-6
+                    and abs(t.quantity - entry_qty) < 1e-6
+                ):
+                    updated_key = self.model.compute_key(t)
+                    break
+            if updated_key is None:
+                updated_key = trade_key
+
+            entry_strategy_val = entry_strategy_var.get().strip()
+            exit_strategy_val = exit_strategy_var.get().strip()
+            note_val = note_text.get("1.0", tk.END).strip()
+            if entry_strategy_val:
+                self.model.entry_strategies[updated_key] = entry_strategy_val
+            else:
+                self.model.entry_strategies.pop(updated_key, None)
+            if exit_strategy_val:
+                self.model.exit_strategies[updated_key] = exit_strategy_val
+            else:
+                self.model.exit_strategies.pop(updated_key, None)
+            if note_val:
+                self.model.notes[updated_key] = note_val
+            else:
+                self.model.notes.pop(updated_key, None)
 
             # Refresh UI and persisted state
             acct_numbers = sorted({tx.account_number for tx in self.model.transactions})
