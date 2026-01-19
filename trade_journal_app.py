@@ -1338,14 +1338,14 @@ class TradeJournalApp:
         self.entry_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.entry_strategy_filter_var, width=22)
         self.entry_strategy_filter_combo.grid(row=4, column=1, columnspan=2, padx=(0, 5), pady=2, sticky="ew")
         self.entry_strategy_filter_combo.bind("<<ComboboxSelected>>", self.on_strategy_filter_change)
-        self.entry_strategy_filter_combo.bind("<KeyRelease>", self.on_strategy_filter_change)
+        self.entry_strategy_filter_combo.bind("<KeyRelease>", lambda e: self._on_strategy_combo_keyrelease(e, is_entry=True))
 
         ttk.Label(top_frame, text="Filter Exit:").grid(row=4, column=3, padx=(0, 2), pady=2, sticky="e")
         self.exit_strategy_filter_var = tk.StringVar(value="all")
         self.exit_strategy_filter_combo = ttk.Combobox(top_frame, textvariable=self.exit_strategy_filter_var, width=22)
         self.exit_strategy_filter_combo.grid(row=4, column=4, columnspan=2, padx=(0, 5), pady=2, sticky="ew")
         self.exit_strategy_filter_combo.bind("<<ComboboxSelected>>", self.on_strategy_filter_change)
-        self.exit_strategy_filter_combo.bind("<KeyRelease>", self.on_strategy_filter_change)
+        self.exit_strategy_filter_combo.bind("<KeyRelease>", lambda e: self._on_strategy_combo_keyrelease(e, is_entry=False))
 
         clear_filter_btn = ttk.Button(top_frame, text="Clear Filters", command=self.clear_filters)
         clear_filter_btn.grid(row=4, column=6, padx=(0, 5), pady=2, sticky="w")
@@ -1742,21 +1742,64 @@ class TradeJournalApp:
         trees_frame.columnconfigure(0, weight=1)
         trees_frame.columnconfigure(1, weight=1)
         trees_frame.rowconfigure(0, weight=1)
-        trees_frame.rowconfigure(1, weight=1)
+        trees_frame.rowconfigure(1, weight=0)
+        trees_frame.rowconfigure(2, weight=1)
 
         entry_frame, self.analysis_entry_tree = self._create_analysis_tree(trees_frame, "Entry Strategies")
         exit_frame, self.analysis_exit_tree = self._create_analysis_tree(trees_frame, "Exit Strategies")
-        combo_frame, self.analysis_combo_tree = self._create_analysis_tree(trees_frame, "Entry -> Exit Combos")
+        self.analysis_combo_frame, self.analysis_combo_tree = self._create_analysis_tree(trees_frame, "Entry -> Exit Combos")
         entry_frame.grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
         exit_frame.grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
-        combo_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=3, pady=3)
+
+        # Collapsible header for entry->exit combos
+        combo_header = ttk.Frame(trees_frame)
+        combo_header.grid(row=1, column=0, columnspan=2, sticky="ew", padx=3)
+        combo_header.columnconfigure(1, weight=1)
+        self.analysis_combo_visible = True
+        self.analysis_combo_toggle_btn = ttk.Button(combo_header, text="−", width=2, command=self._toggle_analysis_combo)
+        self.analysis_combo_toggle_btn.grid(row=0, column=0, sticky="w")
+        ttk.Label(combo_header, text="Entry -> Exit Combos").grid(row=0, column=1, sticky="w")
+
+        self.analysis_combo_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=3, pady=3)
 
         detail_frame = ttk.LabelFrame(parent_frame, text="Details")
         detail_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
         detail_frame.columnconfigure(0, weight=1)
-        self.analysis_detail_text = tk.Text(detail_frame, height=6, wrap="word", state="disabled")
+        detail_frame.rowconfigure(1, weight=1)
+        self.analysis_detail_text = tk.Text(detail_frame, height=5, wrap="word", state="disabled")
         self.analysis_detail_text.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        ttk.Button(detail_frame, text="Filter Journal to this Strategy", command=self._filter_journal_from_analysis).grid(row=1, column=0, sticky="e", padx=2, pady=2)
+
+        # Trade list showing contributing trades for the selected strategy
+        self.analysis_trade_columns = ("idx", "account", "symbol", "entry", "entry_price", "exit", "exit_price", "qty", "pnl", "pnl_pct", "entry_strat", "exit_strat")
+        self.analysis_trade_headings = {
+            "idx": "#",
+            "account": "Account",
+            "symbol": "Symbol",
+            "entry": "Entry",
+            "entry_price": "Entry Px",
+            "exit": "Exit",
+            "exit_price": "Exit Px",
+            "qty": "Qty",
+            "pnl": "P&L",
+            "pnl_pct": "P&L %",
+            "entry_strat": "Entry Strategy",
+            "exit_strat": "Exit Strategy",
+        }
+        self.analysis_detail_tree = ttk.Treeview(detail_frame, columns=self.analysis_trade_columns, show="headings", selectmode="browse")
+        for c in self.analysis_trade_columns:
+            anchor = tk.CENTER if c in {"qty", "pnl_pct"} else tk.E
+            if c in {"entry", "exit"}:
+                anchor = tk.W
+            self.analysis_detail_tree.heading(c, text=self.analysis_trade_headings[c])
+            self.analysis_detail_tree.column(c, width=90 if c not in {"entry_strat", "exit_strat"} else 160, anchor=anchor, stretch=True)
+        vsb = ttk.Scrollbar(detail_frame, orient="vertical", command=self.analysis_detail_tree.yview)
+        hsb = ttk.Scrollbar(detail_frame, orient="horizontal", command=self.analysis_detail_tree.xview)
+        self.analysis_detail_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.analysis_detail_tree.grid(row=1, column=0, sticky="nsew", padx=(2,0), pady=2)
+        vsb.grid(row=1, column=1, sticky="ns", pady=2)
+        hsb.grid(row=2, column=0, sticky="ew", padx=2)
+
+        ttk.Button(detail_frame, text="Filter Journal to this Strategy", command=self._filter_journal_from_analysis).grid(row=3, column=0, sticky="e", padx=2, pady=2)
 
     def _create_analysis_tree(self, parent: ttk.Frame, title: str) -> Tuple[ttk.LabelFrame, ttk.Treeview]:
         frame = ttk.LabelFrame(parent, text=title)
@@ -1784,7 +1827,18 @@ class TradeJournalApp:
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         tree.bind("<<TreeviewSelect>>", self._on_analysis_select)
+        tree.bind("<Double-1>", self._on_analysis_open_dialog)
         return frame, tree
+
+    def _toggle_analysis_combo(self) -> None:
+        if getattr(self, "analysis_combo_visible", True):
+            self.analysis_combo_frame.grid_remove()
+            self.analysis_combo_toggle_btn.config(text="+")
+            self.analysis_combo_visible = False
+        else:
+            self.analysis_combo_frame.grid()
+            self.analysis_combo_toggle_btn.config(text="−")
+            self.analysis_combo_visible = True
 
     def _on_tab_changed(self, event: tk.Event) -> None:
         try:
@@ -1991,6 +2045,7 @@ class TradeJournalApp:
                 "wins": wins,
                 "losses": losses,
                 "breakeven": g["breakeven"],
+                "trade_ids": list(g["trade_ids"]),
             })
 
         def sort_key(row: dict):
@@ -2049,15 +2104,55 @@ class TradeJournalApp:
             return
         key = sel[0]
         row = rows.get(key)
-        self._analysis_selected = (widget.master.cget("text"), row) if row else None
-        self._set_analysis_detail(row)
+        label = widget.master.cget("text")
+        self._analysis_selected = (label, row) if row else None
+        self._set_analysis_detail(row, label=label)
 
-    def _set_analysis_detail(self, row: Optional[dict]) -> None:
+    def _on_analysis_open_dialog(self, event: tk.Event) -> None:
+        widget: ttk.Treeview = event.widget  # type: ignore
+        row_id = widget.identify_row(event.y)
+        if not row_id:
+            return
+        rows = getattr(widget, "_analysis_rows", {})
+        row = rows.get(row_id)
+        if not row:
+            return
+        widget.selection_set(row_id)
+        label = widget.master.cget("text")
+        self._open_analysis_trades_dialog(label, row)
+
+    def _open_analysis_trades_dialog(self, label: str, row: dict) -> None:
+        trades = self._analysis_trades_from_row(row, label=label)
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"{label}: {row.get('name', '')}")
+        dialog.geometry("1100x520")
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+        tree = ttk.Treeview(dialog, columns=self.analysis_trade_columns, show="headings", selectmode="browse")
+        for c in self.analysis_trade_columns:
+            anchor = tk.CENTER if c in {"qty", "pnl_pct"} else tk.E
+            if c in {"entry", "exit", "entry_strat", "exit_strat"}:
+                anchor = tk.W
+            tree.heading(c, text=self.analysis_trade_headings[c])
+            tree.column(c, width=90 if c not in {"entry_strat", "exit_strat"} else 180, anchor=anchor, stretch=True)
+        vsb = ttk.Scrollbar(dialog, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(dialog, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
+
+        self._fill_analysis_trade_tree(tree, trades)
+
+    def _set_analysis_detail(self, row: Optional[dict], *, label: Optional[str] = None) -> None:
         self.analysis_detail_text.configure(state="normal")
         self.analysis_detail_text.delete("1.0", tk.END)
         if not row:
             self.analysis_detail_text.insert(tk.END, "Select a strategy to see details.")
         else:
+            avg_hold_str = "n/a" if row.get("avg_hold") is None else f"{row['avg_hold']:.1f}"
             self.analysis_detail_text.insert(tk.END, (
                 f"Strategy: {row['name']}\n"
                 f"Trades: {row['trades']} (W {row['wins']} / L {row['losses']} / B {row['breakeven']})\n"
@@ -2066,9 +2161,92 @@ class TradeJournalApp:
                 f"Win Rate: {row['win_rate']*100:.2f}%\n"
                 f"Profit Factor: {'∞' if row['profit_factor']==float('inf') else f'{row['profit_factor']:.2f}'}\n"
                 f"Expectancy: {row['expectancy']:.2f}\n"
-                f"Avg Hold: {row['avg_hold']:.1f if row['avg_hold'] is not None else 'n/a'}\n"
+                f"Avg Hold: {avg_hold_str}\n"
             ))
         self.analysis_detail_text.configure(state="disabled")
+        self._populate_analysis_detail_trades(row, label=label)
+
+    def _analysis_trades_from_row(self, row: Optional[dict], *, label: Optional[str] = None) -> List[dict]:
+        if not row:
+            return []
+        trade_ids = row.get("trade_ids")
+        collected: List[Tuple[int, TradeEntry, str, str]] = []
+        if trade_ids:
+            for tidx in trade_ids:
+                if tidx is None or not isinstance(tidx, int):
+                    continue
+                if tidx < 0 or tidx >= len(self.model.trades):
+                    continue
+                trade = self.model.trades[tidx]
+                collected.append((tidx, trade, "", ""))
+        if not collected:
+            # Fallback: rebuild from filtered trades that match the selected strategy label
+            label_norm = (label or "").lower()
+            name_norm = (row.get("name", "") or "").lower()
+            for idx, trade, entry_tags, exit_tags in self._filtered_trades_for_analysis():
+                entry_list = [t.lower() for t in self._parse_strategy_tags(entry_tags)]
+                exit_list = [t.lower() for t in self._parse_strategy_tags(exit_tags)]
+                if label_norm.startswith("entry"):
+                    if name_norm in entry_list:
+                        collected.append((idx, trade, entry_tags, exit_tags))
+                elif label_norm.startswith("exit"):
+                    if name_norm in exit_list:
+                        collected.append((idx, trade, entry_tags, exit_tags))
+                else:
+                    if "->" in name_norm:
+                        e_name, x_name = [p.strip() for p in name_norm.split("->", 1)]
+                        if e_name in entry_list and x_name in exit_list:
+                            collected.append((idx, trade, entry_tags, exit_tags))
+        results: List[dict] = []
+        for _, trade, entry_tags, exit_tags in collected:
+            key = self.model.compute_key(trade)
+            entry_strat = self.model.entry_strategies.get(key, trade.entry_strategy or entry_tags or "")
+            exit_strat = self.model.exit_strategies.get(key, trade.exit_strategy or exit_tags or "")
+            results.append({
+                "account": trade.account_number,
+                "symbol": trade.symbol,
+                "entry": trade.entry_date.strftime("%Y-%m-%d"),
+                "entry_price": trade.entry_price,
+                "exit": trade.exit_date.strftime("%Y-%m-%d") if trade.exit_date else "",
+                "exit_price": trade.exit_price,
+                "qty": trade.quantity,
+                "pnl": trade.pnl,
+                "pnl_pct": trade.pnl_pct,
+                "entry_strat": entry_strat,
+                "exit_strat": exit_strat,
+            })
+        return results
+
+    def _populate_analysis_detail_trades(self, row: Optional[dict], *, label: Optional[str] = None) -> None:
+        tree = getattr(self, "analysis_detail_tree", None)
+        if tree is None:
+            return
+        self._fill_analysis_trade_tree(tree, self._analysis_trades_from_row(row, label=label))
+
+    def _fill_analysis_trade_tree(self, tree: ttk.Treeview, trades: List[dict]) -> None:
+        for item in tree.get_children():
+            tree.delete(item)
+        if not trades:
+            return
+        for i, t in enumerate(trades, start=1):
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    i,
+                    t.get("account", ""),
+                    t.get("symbol", ""),
+                    t.get("entry", ""),
+                    f"{t['entry_price']:.2f}" if t.get("entry_price") is not None else "",
+                    t.get("exit", ""),
+                    f"{t['exit_price']:.2f}" if t.get("exit_price") is not None else "",
+                    f"{t['qty']:.2f}" if t.get("qty") is not None else "",
+                    f"{t['pnl']:.2f}" if t.get("pnl") is not None else "",
+                    f"{t['pnl_pct']:.2f}%" if t.get("pnl_pct") is not None else "",
+                    t.get("entry_strat", ""),
+                    t.get("exit_strat", ""),
+                ),
+            )
 
     def _filter_journal_from_analysis(self) -> None:
         sel = self._analysis_selected
@@ -2171,6 +2349,27 @@ class TradeJournalApp:
             pnl_pct_str = f"{trade.pnl_pct:.2f}%" if trade.pnl_pct is not None else ""
             
             self.chart_trades_tree.insert("", "end", values=(account_str, entry_date_str, entry_price_str, exit_date_str, exit_price_str, qty_str, pnl_str, pnl_pct_str))
+
+    def _on_strategy_combo_keyrelease(self, event: tk.Event, *, is_entry: bool) -> None:
+        """Filter strategy dropdown values as user types (substring match, case-insensitive)."""
+        combo = self.entry_strategy_filter_combo if is_entry else self.exit_strategy_filter_combo
+        all_values = getattr(self, "entry_strategy_all_values" if is_entry else "exit_strategy_all_values", ["all"])
+        typed = combo.get().strip()
+        if not typed:
+            combo['values'] = all_values
+        else:
+            low = typed.lower()
+            filtered = [v for v in all_values if low in v.lower() or v == "all"]
+            # Deduplicate while preserving order
+            seen = set()
+            ordered = []
+            for v in filtered:
+                if v not in seen:
+                    seen.add(v)
+                    ordered.append(v)
+            combo['values'] = ordered if ordered else all_values
+        # Apply filter to table on each key stroke
+        self.on_strategy_filter_change(None)
 
     def _update_trades_table_for_zoom(self, trades_for_symbol: list, ohlc_df: pd.DataFrame, xlim: tuple) -> None:
         """Filter trades table to show only trades within the current zoom bounds."""
@@ -3223,8 +3422,10 @@ class TradeJournalApp:
                 exit_strategies.update(extract_individual_strategies(exit_strat))
         
         # Update combo box values
-        self.entry_strategy_filter_combo['values'] = ["all"] + sorted(list(entry_strategies))
-        self.exit_strategy_filter_combo['values'] = ["all"] + sorted(list(exit_strategies))
+        self.entry_strategy_all_values = ["all"] + sorted(list(entry_strategies))
+        self.exit_strategy_all_values = ["all"] + sorted(list(exit_strategies))
+        self.entry_strategy_filter_combo['values'] = self.entry_strategy_all_values
+        self.exit_strategy_filter_combo['values'] = self.exit_strategy_all_values
         # Determine filters
         closed_only = self.closed_only_var.get()
         account_filter = self.account_var.get()
