@@ -160,7 +160,8 @@ def load_chart_settings():
         "ema3_enabled": False,
         "top_n": "",
         "top_filter_type": "None",
-        "top_filter_metric": "PnL"
+        "top_filter_metric": "PnL",
+        "compare_spy": False,
     }
     try:
         if os.path.exists(CONFIG_FILE):
@@ -2681,14 +2682,17 @@ class TradeJournalApp:
                     on_color_change=lambda hx: ema3_swatch.itemconfig(ema3_rect, fill=hx, outline=hx)
                 )
             ).pack(side=tk.LEFT, padx=(0, 8))
-            
+
+            compare_spy_var = tk.BooleanVar(value=saved_settings.get("compare_spy", False))
+
             # Update button with save functionality
             def update_and_save():
                 self._update_chart_indicators(symbol, df, trades_for_symbol, 
                                              ema1_var, ema2_var, ema3_var,
                                              ema1_type_var, ema2_type_var, ema3_type_var,
                                              ema1_color_var, ema2_color_var, ema3_color_var,
-                                             ema1_enabled_var, ema2_enabled_var, ema3_enabled_var)
+                                             ema1_enabled_var, ema2_enabled_var, ema3_enabled_var,
+                                             compare_spy_var)
                 # Save settings
                 save_chart_settings(
                     {
@@ -2704,9 +2708,11 @@ class TradeJournalApp:
                         "ema1_enabled": ema1_enabled_var.get(),
                         "ema2_enabled": ema2_enabled_var.get(),
                         "ema3_enabled": ema3_enabled_var.get(),
+                        "compare_spy": compare_spy_var.get(),
                     }
                 )
             
+            ttk.Checkbutton(self.chart_controls_frame, text="Compare SPY", variable=compare_spy_var, command=update_and_save).pack(side=tk.LEFT, padx=(10, 4))
             ttk.Button(self.chart_controls_frame, text="Update", command=update_and_save).pack(side=tk.LEFT, padx=5)
 
             # Build candlestick chart with initial values
@@ -2714,7 +2720,8 @@ class TradeJournalApp:
                                                    int(ema1_var.get()), int(ema2_var.get()), int(ema3_var.get()),
                                                    ema1_type_var.get(), ema2_type_var.get(), ema3_type_var.get(),
                                                    ema1_color_var.get(), ema2_color_var.get(), ema3_color_var.get(),
-                                                   ema1_enabled_var.get(), ema2_enabled_var.get(), ema3_enabled_var.get())
+                                                   ema1_enabled_var.get(), ema2_enabled_var.get(), ema3_enabled_var.get(),
+                                                   compare_spy_var.get())
 
             self.chart_status_var.set(f"Interactive chart for {symbol} - Adjust moving averages and click Update")
 
@@ -2730,7 +2737,8 @@ class TradeJournalApp:
                                  ema1_var: tk.StringVar, ema2_var: tk.StringVar, ema3_var: tk.StringVar,
                                  ema1_type_var: tk.StringVar, ema2_type_var: tk.StringVar, ema3_type_var: tk.StringVar,
                                  ema1_color_var: tk.StringVar, ema2_color_var: tk.StringVar, ema3_color_var: tk.StringVar,
-                                 ema1_enabled_var: tk.BooleanVar, ema2_enabled_var: tk.BooleanVar, ema3_enabled_var: tk.BooleanVar) -> None:
+                                 ema1_enabled_var: tk.BooleanVar, ema2_enabled_var: tk.BooleanVar, ema3_enabled_var: tk.BooleanVar,
+                                 compare_spy_var: tk.BooleanVar) -> None:
         """Update chart when moving average periods, types, colors, or visibility change."""
         try:
             ema1 = int(ema1_var.get())
@@ -2762,13 +2770,43 @@ class TradeJournalApp:
                                                ema1, ema2, ema3,
                                                ema1_type_var.get(), ema2_type_var.get(), ema3_type_var.get(),
                                                ema1_color_var.get(), ema2_color_var.get(), ema3_color_var.get(),
-                                               ema1_enabled_var.get(), ema2_enabled_var.get(), ema3_enabled_var.get())
+                                               ema1_enabled_var.get(), ema2_enabled_var.get(), ema3_enabled_var.get(),
+                                               compare_spy_var.get())
+
+    def _get_comparison_data(self, base_df: pd.DataFrame, symbol: str) -> Optional[pd.DataFrame]:
+        """Fetch or load comparison symbol data spanning the base_df date range."""
+        start_date = base_df.index.min().date()
+        end_date = base_df.index.max().date()
+        # Ensure metadata covers range; fetch if needed
+        needs_fetch = False
+        meta = self.price_manager.get_metadata(symbol)
+        if meta:
+            try:
+                meta_start = dt.datetime.fromisoformat(meta['start_date']).date()
+                meta_end = dt.datetime.fromisoformat(meta['end_date']).date()
+                if meta_start > start_date or meta_end < end_date:
+                    needs_fetch = True
+            except Exception:
+                needs_fetch = True
+        else:
+            needs_fetch = True
+
+        if needs_fetch and HAS_YFINANCE:
+            try:
+                self.chart_status_var.set(f"Updating {symbol} for comparison...")
+                self.root.update()
+                self.price_manager.fetch_and_store(symbol, start_date, end_date)
+            except Exception:
+                return None
+
+        return self.price_manager.get_price_data(symbol, start_date, end_date)
 
     def _plot_candlestick_with_indicators(self, symbol: str, df: pd.DataFrame, trades_for_symbol: list,
                                           ema1_period: int, ema2_period: int, ema3_period: int,
                                           ema1_type: str = "EMA", ema2_type: str = "EMA", ema3_type: str = "EMA",
                                           ema1_color: str = "blue", ema2_color: str = "orange", ema3_color: str = "purple",
-                                          ema1_enabled: bool = True, ema2_enabled: bool = True, ema3_enabled: bool = False) -> None:
+                                          ema1_enabled: bool = True, ema2_enabled: bool = True, ema3_enabled: bool = False,
+                                          compare_spy: bool = False) -> None:
         """Create and display the candlestick chart with selected indicators."""
         # Rename columns to match mplfinance expectations
         ohlc_df = df[['open', 'high', 'low', 'close']].copy()
@@ -2787,6 +2825,19 @@ class TradeJournalApp:
         ema2 = calculate_moving_average(df['close'], ema2_period, ema2_type)
         ema3 = calculate_moving_average(df['close'], ema3_period, ema3_type)
 
+        spy_df = None
+        if compare_spy:
+            spy_df = self._get_comparison_data(df, "SPY")
+            if spy_df is None or spy_df.empty:
+                self.chart_status_var.set("Could not load SPY data for comparison.")
+                spy_df = None
+            else:
+                # Align SPY to primary index to avoid mplfinance length errors
+                try:
+                    spy_df = spy_df.reindex(df.index).ffill()
+                except Exception:
+                    spy_df = None
+
         # Create candlestick figure with additional plots
         apds = []
 
@@ -2801,6 +2852,11 @@ class TradeJournalApp:
             apds.append(mpf.make_addplot(ema2, color=ema2_plot_color, width=1.5, secondary_y=False))
         if ema3_enabled:
             apds.append(mpf.make_addplot(ema3, color=ema3_plot_color, width=1.5, secondary_y=False))
+
+        if compare_spy and spy_df is not None:
+            spy_close = spy_df['close']
+            if not spy_close.isna().all():
+                apds.append(mpf.make_addplot(spy_close, color="#666666", width=1.3, linestyle='--', secondary_y=True))
         
         # Add buy signals (green arrows at low)
         buy_trades = [t for t in trades_for_symbol if t.entry_date.date() in df.index.date]
@@ -2829,7 +2885,7 @@ class TradeJournalApp:
             apds.append(mpf.make_addplot(sell_dots, type='scatter', marker='v', markersize=100, color='red'))
 
         # Build title with symbol only
-        title_text = f"{symbol} Price Chart"
+        title_text = f"{symbol} Price Chart" + (" (SPY comparison)" if compare_spy and spy_df is not None else "")
 
         # Create the plot
         fig, axes = mpf.plot(
@@ -2863,6 +2919,8 @@ class TradeJournalApp:
         if ema3_enabled:
             ema3_color_hex = name_to_hex(ema3_color)
             legend_elements.append(Line2D([0], [0], color=ema3_color_hex, lw=2, label=f'{ema3_type} {ema3_period}'))
+        if compare_spy and spy_df is not None:
+            legend_elements.append(Line2D([0], [0], color="#666666", lw=1.5, ls='--', label='SPY'))
         
         legend_elements.extend([
             Line2D([0], [0], marker='^', color='w', markerfacecolor='green', markersize=8, label='Buy'),
