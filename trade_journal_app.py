@@ -3355,6 +3355,11 @@ class TradeJournalApp:
         # Redraw chart only when visible
         if self.chart_visible.get():
             self.update_summary_and_chart()
+        # Persist visibility state
+        try:
+            self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+        except Exception:
+            pass
 
     def autofit_columns(self) -> None:
         """Auto-fit table columns to content width."""
@@ -4065,6 +4070,7 @@ class TradeJournalApp:
             "group_by_symbol": self.group_var.get(),
             "entry_strategy_filter": self.entry_strategy_filter_var.get(),
             "exit_strategy_filter": self.exit_strategy_filter_var.get(),
+            "chart_visible": self.chart_visible.get(),
         }
 
     def _reset_text_sizes(self) -> None:
@@ -4229,17 +4235,14 @@ class TradeJournalApp:
         label_entry = tk.Text(label_frame, height=2, width=60)
         label_entry.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Trade notes frame
-        notes_frame = ttk.LabelFrame(preview_win, text="Trade Notes (optional)")
+        # Screenshot notes frame
+        notes_frame = ttk.LabelFrame(preview_win, text="Screenshot Notes (optional)")
         notes_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         notes_entry = tk.Text(notes_frame, height=6, width=60)
         notes_entry.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Load existing notes if any
-        existing_notes = self.model.notes.get(key, "")
-        if existing_notes:
-            notes_entry.insert("1.0", existing_notes)
+        # No existing per-screenshot notes yet; leave blank
         
         # Buttons
         button_frame = ttk.Frame(preview_win)
@@ -4257,16 +4260,35 @@ class TradeJournalApp:
             # Store path as relative if possible (for portability across machines)
             stored_path = self._make_screenshot_path_relative(filepath)
             
-            # Create screenshot entry with filepath and label
-            screenshot_entry = {"filepath": stored_path, "label": label if label else os.path.basename(filepath)}
+            # Create screenshot entry with filepath, label, and optional note
+            screenshot_entry = {
+                "filepath": stored_path,
+                "label": label if label else os.path.basename(filepath),
+                "note": notes,
+            }
             
             # Check if this file is already attached
             if not any(s["filepath"] == stored_path for s in self.model.screenshots[key]):
                 self.model.screenshots[key].append(screenshot_entry)
             
-            # Save notes if provided
+            # Update note for this screenshot if we just added it
+            if notes and any(s.get("filepath") == stored_path for s in self.model.screenshots[key]):
+                for s in self.model.screenshots[key]:
+                    if s.get("filepath") == stored_path:
+                        s["note"] = notes
+                        break
+
+            # Append to trade-level notes (continuous field)
             if notes:
-                self.model.notes[key] = notes
+                existing = (self.model.notes.get(key, "") or "").rstrip()
+                new_note = existing
+                if new_note:
+                    if not new_note.endswith("\n"):
+                        new_note += "\n\n"
+                    else:
+                        new_note += "\n"
+                new_note += notes
+                self.model.notes[key] = new_note
             
             # Update screenshot display
             num_screenshots = len(self.model.screenshots[key])
@@ -4473,19 +4495,21 @@ class TradeJournalApp:
                     skipped_empty += 1
                     continue
 
-                # Append note to each candidate trade, avoiding duplicates
+                # Append note to each candidate trade, avoiding duplicates and stamping with note date
+                stamp = note_date.strftime("%Y-%m-%d") if note_date else dt.date.today().strftime("%Y-%m-%d")
+                stamped_note = f"[{stamp}]\n{note_text}"
                 for trade_key in candidates:
                     existing = self.model.notes.get(trade_key, "") or ""
-                    if note_text and note_text in existing:
+                    if stamped_note in existing:
                         skipped_duplicate += 1
                         continue
-                    if existing.strip():
-                        new_note = existing.rstrip()
+                    new_note = existing.rstrip()
+                    if new_note:
                         if not new_note.endswith("\n"):
                             new_note += "\n\n"
-                        new_note += note_text
-                    else:
-                        new_note = note_text
+                        else:
+                            new_note += "\n"
+                    new_note += stamped_note
                     self.model.notes[trade_key] = new_note
                     added += 1
 
@@ -4549,6 +4573,29 @@ class TradeJournalApp:
             self.screenshot_preview_label.configure(image="")
             self.screenshot_preview_label.image = None
 
+    def _rebuild_trade_notes_from_screenshots(self, trade_key: tuple) -> None:
+        """Append per-screenshot notes into the trade-level notes without erasing existing text."""
+        shots = self.model.screenshots.get(trade_key, []) or []
+        existing = (self.model.notes.get(trade_key, "") or "").rstrip()
+        new_note = existing
+        for idx, s in enumerate(shots, start=1):
+            note = (s.get("note") or "").strip()
+            if not note:
+                continue
+            label = (s.get("label") or f"Screenshot {idx}").strip()
+            block = f"[{label}]\n{note}"
+            if block in new_note:
+                continue
+            if new_note:
+                if not new_note.endswith("\n"):
+                    new_note += "\n\n"
+                else:
+                    new_note += "\n"
+            new_note += block
+        # Only update if there's anything to store; never delete existing notes here
+        if new_note:
+            self.model.notes[trade_key] = new_note
+
     def view_screenshots(self) -> None:
         """Open a window showing all screenshots for the selected trade with labels, notes, and removal option."""
         selected = self.tree.selection()
@@ -4568,6 +4615,7 @@ class TradeJournalApp:
         ss_window = tk.Toplevel(self.root)
         ss_window.title("Screenshots")
         ss_window.geometry("900x800")
+        ss_window.bind("<Escape>", lambda e: (save_changes(), ss_window.destroy()))
         
         screenshots = self.model.screenshots[key]
         
@@ -4577,6 +4625,9 @@ class TradeJournalApp:
         
         # Track current screenshot index
         current_index = [0]
+        if not hasattr(self, "screenshot_zoom_level"):
+            self.screenshot_zoom_level = 1.0
+        zoom_level = [self.screenshot_zoom_level]
         
         def update_image():
             """Update the displayed image, label, and notes."""
@@ -4584,30 +4635,38 @@ class TradeJournalApp:
             filepath = screenshot_data["filepath"]
             resolved_path = self._resolve_screenshot_path(filepath)
             label = screenshot_data.get("label", "")
-            
+
             try:
                 from PIL import Image, ImageTk  # type: ignore
                 img = Image.open(resolved_path)
-                # Scale to fit window while maintaining aspect ratio
-                img.thumbnail((850, 400))
+                w, h = img.size
+                # Base scale to fit visible canvas area
+                max_w = max(1, img_canvas.winfo_width())
+                max_h = max(1, img_canvas.winfo_height())
+                base_scale = min(max_w / w, max_h / h)
+                scale = max(0.1, min(4.0, base_scale * zoom_level[0]))
+                img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
-                img_label.configure(image=photo)
-                img_label.image = photo
+                img_canvas.delete("all")
+                img_canvas.create_image(0, 0, image=photo, anchor="nw")
+                img_canvas.image = photo
+                img_canvas.configure(scrollregion=(0, 0, img.width, img.height))
             except Exception as e:
-                img_label.configure(text=f"Could not load image: {e}")
+                img_canvas.delete("all")
+                img_canvas.create_text(10, 10, text=f"Could not load image: {e}", anchor="nw", fill="white")
             
             # Update labels
             counter_text = f"Screenshot {current_index[0] + 1} of {len(screenshots)}"
             counter_label.config(text=counter_text)
-            
+
             # Update label field
             label_text.config(state=tk.NORMAL)
             label_text.delete("1.0", tk.END)
             label_text.insert("1.0", label)
             label_text.config(state=tk.NORMAL)
-            
-            # Update notes field
-            notes = self.model.notes.get(key, "")
+
+            # Update notes field (continuous trade-level notes)
+            notes = self.model.notes.get(key, "") or ""
             notes_text.config(state=tk.NORMAL)
             notes_text.delete("1.0", tk.END)
             notes_text.insert("1.0", notes)
@@ -4615,17 +4674,20 @@ class TradeJournalApp:
         
         def prev_image():
             if current_index[0] > 0:
+                save_notes_only()
                 current_index[0] -= 1
                 update_image()
         
         def next_image():
             if current_index[0] < len(screenshots) - 1:
+                save_notes_only()
                 current_index[0] += 1
                 update_image()
         
         def remove_current():
             """Remove the currently displayed screenshot."""
             if messagebox.askyesno("Remove Screenshot", f"Remove this screenshot ('{screenshots[current_index[0]].get('label', 'Untitled')}')?"):
+                save_notes_only()
                 screenshots.pop(current_index[0])
                 if not screenshots:
                     # No more screenshots, close window
@@ -4641,18 +4703,19 @@ class TradeJournalApp:
                         current_index[0] = len(screenshots) - 1
                     update_image()
         
+        def save_notes_only():
+            """Persist current trade-level notes from the text widget."""
+            new_notes = notes_text.get("1.0", tk.END).strip()
+            self.model.notes[key] = new_notes
+            screenshots[current_index[0]]["note"] = new_notes
+
         def save_changes():
             """Auto-save label and notes changes."""
             # Get label from text widget
             new_label = label_text.get("1.0", tk.END).strip()
             screenshots[current_index[0]]["label"] = new_label if new_label else os.path.basename(screenshots[current_index[0]]["filepath"])
-            
-            # Get notes from text widget
-            new_notes = notes_text.get("1.0", tk.END).strip()
-            if new_notes:
-                self.model.notes[key] = new_notes
-            elif key in self.model.notes:
-                del self.model.notes[key]
+
+            save_notes_only()
             
             # Refresh main tree display if this trade is still selected
             current_selection = self.tree.selection()
@@ -4672,27 +4735,70 @@ class TradeJournalApp:
         next_btn = ttk.Button(nav_frame, text="Next →", command=next_image)
         next_btn.pack(side=tk.LEFT, padx=5)
         
+        def zoom_in():
+            zoom_level[0] = min(4.0, zoom_level[0] * 1.25)
+            self.screenshot_zoom_level = zoom_level[0]
+            update_image()
+
+        def zoom_out():
+            zoom_level[0] = max(0.1, zoom_level[0] / 1.25)
+            self.screenshot_zoom_level = zoom_level[0]
+            update_image()
+
+        def zoom_reset():
+            zoom_level[0] = 1.0
+            self.screenshot_zoom_level = zoom_level[0]
+            update_image()
+
+        ttk.Button(nav_frame, text="Zoom +", command=zoom_in).pack(side=tk.LEFT, padx=5)
+        ttk.Button(nav_frame, text="Zoom -", command=zoom_out).pack(side=tk.LEFT, padx=5)
+        ttk.Button(nav_frame, text="Reset", command=zoom_reset).pack(side=tk.LEFT, padx=5)
+
         remove_btn = ttk.Button(nav_frame, text="Remove This", command=remove_current)
         remove_btn.pack(side=tk.LEFT, padx=5)
         
-        # Image label
-        img_label = ttk.Label(ss_window)
-        img_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+        # Split layout: image on left with scrollbars, notes on right
+        content_frame = ttk.Frame(ss_window)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        content_frame.columnconfigure(0, weight=3)
+        content_frame.columnconfigure(1, weight=2)
+        content_frame.rowconfigure(0, weight=1)
+
+        # Image canvas with scrollbars
+        img_canvas = tk.Canvas(content_frame, background="#2b2b2b", highlightthickness=0)
+        img_canvas.grid(row=0, column=0, sticky="nsew")
+        v_scroll = ttk.Scrollbar(content_frame, orient="vertical", command=img_canvas.yview)
+        h_scroll = ttk.Scrollbar(content_frame, orient="horizontal", command=img_canvas.xview)
+        img_canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        v_scroll.grid(row=0, column=2, sticky="ns")
+        h_scroll.grid(row=1, column=0, sticky="ew")
+
+        # Right-side notes panel
+        notes_panel = ttk.Frame(content_frame)
+        notes_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        notes_panel.columnconfigure(0, weight=1)
+        notes_panel.rowconfigure(1, weight=1)
+
         # Label frame
-        label_frame = ttk.LabelFrame(ss_window, text="Screenshot Label")
-        label_frame.pack(fill=tk.X, padx=10, pady=5)
-        label_text = tk.Text(label_frame, height=2, width=80, wrap=tk.WORD)
-        label_text.pack(fill=tk.X, padx=5, pady=5)
-        
-        # Notes frame
-        notes_frame = ttk.LabelFrame(ss_window, text="Trade Notes")
-        notes_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        notes_text = tk.Text(notes_frame, height=6, width=80, wrap=tk.WORD)
-        notes_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        label_frame = ttk.LabelFrame(notes_panel, text="Screenshot Label")
+        label_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        label_frame.columnconfigure(0, weight=1)
+        label_text = tk.Text(label_frame, height=2, wrap=tk.WORD)
+        label_text.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+
+        # Notes frame (continuous trade notes)
+        notes_frame = ttk.LabelFrame(notes_panel, text="Trade Notes")
+        notes_frame.grid(row=1, column=0, sticky="nsew")
+        notes_frame.columnconfigure(0, weight=1)
+        notes_frame.rowconfigure(0, weight=1)
+        notes_text = tk.Text(notes_frame, wrap=tk.WORD)
+        notes_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
         # Display first image
         update_image()
+
+        # Refresh image sizing after layout
+        ss_window.after(50, update_image)
     
     def view_internal_chart(self) -> None:
         """Switch to Charts tab, download data, and display chart for the selected trade's symbol."""
@@ -5719,6 +5825,8 @@ class TradeJournalApp:
                     self.symbol_filter_var.set(filter_state.get('symbol_filter', ''))
                     self.entry_strategy_filter_var.set(filter_state.get('entry_strategy_filter', 'all'))
                     self.exit_strategy_filter_var.set(filter_state.get('exit_strategy_filter', 'all'))
+                    if 'chart_visible' in filter_state:
+                        self.chart_visible.set(bool(filter_state.get('chart_visible')))
                     # Apply date filter if dates were set
                     if filter_state.get('start_date') or filter_state.get('end_date') or filter_state.get('exit_start_date') or filter_state.get('exit_end_date'):
                         self.apply_date_filter()
@@ -5727,6 +5835,13 @@ class TradeJournalApp:
                 # Populate table and summary
                 self.populate_table()
                 self.update_summary_and_chart()
+                # Apply chart visibility after layout
+                if not self.chart_visible.get():
+                    try:
+                        self.left_paned.remove(self.chart_frame)
+                        self.toggle_chart_btn.config(text="Show Chart")
+                    except Exception:
+                        pass
                 # Update chart tab symbol list
                 self.update_chart_symbols()
                 # Restore chart symbol and display if available
@@ -5755,6 +5870,7 @@ class TradeJournalApp:
                 'entry_strategy_filter': self.entry_strategy_filter_var.get(),
                 'exit_strategy_filter': self.exit_strategy_filter_var.get(),
                 'chart_symbol': self.chart_symbol_var.get(),
+                'chart_visible': self.chart_visible.get(),
             }
             self.model.save_state(self.persist_path, filter_state)
         except Exception:
