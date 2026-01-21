@@ -1173,6 +1173,11 @@ class TradeJournalApp:
         self.analysis_include_unspecified_var = tk.BooleanVar(value=False)
         self.analysis_start_date_var = tk.StringVar(value="")
         self.analysis_end_date_var = tk.StringVar(value="")
+        # Analysis Two state
+        self.analysis2_starting_balances: Dict[str, Dict[int, float]] = {}
+        self.analysis2_year_var = tk.StringVar(value="")
+        self.analysis2_start_balance_var = tk.StringVar(value="")
+        self.analysis2_account_label_var = tk.StringVar(value="all")
         # UI elements
         self._build_ui()
         # Sorting state: which column and whether descending
@@ -1393,6 +1398,11 @@ class TradeJournalApp:
         analysis_frame = ttk.Frame(self.notebook)
         self.notebook.add(analysis_frame, text="Analysis")
         self._build_analysis_tab(analysis_frame)
+
+        # TAB 4: Analysis Two
+        analysis_two_frame = ttk.Frame(self.notebook)
+        self.notebook.add(analysis_two_frame, text="Analysis 2")
+        self._build_analysis_two_tab(analysis_two_frame)
 
         # Build journal tab content using existing layout structure
         self._build_journal_tab(journal_frame)
@@ -1802,6 +1812,370 @@ class TradeJournalApp:
 
         ttk.Button(detail_frame, text="Filter Journal to this Strategy", command=self._filter_journal_from_analysis).grid(row=3, column=0, sticky="e", padx=2, pady=2)
 
+    def _build_analysis_two_tab(self, parent_frame: ttk.Frame) -> None:
+        parent_frame.columnconfigure(0, weight=1)
+        parent_frame.rowconfigure(1, weight=1)
+        parent_frame.rowconfigure(2, weight=0)
+        parent_frame.rowconfigure(3, weight=1)
+
+        controls = ttk.LabelFrame(parent_frame, text="Year Settings")
+        controls.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        for i in range(8):
+            controls.columnconfigure(i, weight=1)
+
+        ttk.Label(controls, text="Account:").grid(row=0, column=0, padx=2, pady=2, sticky="e")
+        self.analysis2_account_combo = ttk.Combobox(controls, textvariable=self.account_var, state="readonly", width=15)
+        self.analysis2_account_combo.grid(row=0, column=1, padx=2, pady=2, sticky="w")
+        self.analysis2_account_combo.bind("<<ComboboxSelected>>", self.on_account_filter_change)
+
+        ttk.Label(controls, text="Year:").grid(row=0, column=2, padx=2, pady=2, sticky="e")
+        self.analysis2_year_combo = ttk.Combobox(controls, textvariable=self.analysis2_year_var, state="readonly", width=8)
+        self.analysis2_year_combo.grid(row=0, column=3, padx=2, pady=2, sticky="w")
+        self.analysis2_year_combo.bind("<<ComboboxSelected>>", lambda e: self.update_analysis_two_view())
+
+        ttk.Label(controls, text="Starting Balance:").grid(row=0, column=4, padx=2, pady=2, sticky="e")
+        self.analysis2_start_balance_entry = ttk.Entry(controls, textvariable=self.analysis2_start_balance_var, width=14)
+        self.analysis2_start_balance_entry.grid(row=0, column=5, padx=2, pady=2, sticky="w")
+
+        self.analysis2_save_balance_btn = ttk.Button(controls, text="Save", command=self._analysis2_save_starting_balance)
+        self.analysis2_save_balance_btn.grid(row=0, column=6, padx=2, pady=2, sticky="w")
+        self.analysis2_clear_balance_btn = ttk.Button(controls, text="Clear", command=self._analysis2_clear_starting_balance)
+        self.analysis2_clear_balance_btn.grid(row=0, column=7, padx=2, pady=2, sticky="w")
+
+        self.analysis2_monthly_frame = ttk.LabelFrame(parent_frame, text="Monthly Returns")
+        self.analysis2_monthly_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.analysis2_monthly_frame.columnconfigure(0, weight=1)
+        self.analysis2_monthly_frame.rowconfigure(0, weight=1)
+
+        monthly_cols = ("month", "month_return", "cum_return", "prorated_return")
+        self.analysis2_monthly_tree = ttk.Treeview(self.analysis2_monthly_frame, columns=monthly_cols, show="headings", height=8)
+        headings = {
+            "month": "Month",
+            "month_return": "Month Return",
+            "cum_return": "Cumulative Return",
+            "prorated_return": "Pro-Rated Return",
+        }
+        for c in monthly_cols:
+            anchor = tk.W if c == "month" else tk.E
+            self.analysis2_monthly_tree.heading(c, text=headings[c])
+            self.analysis2_monthly_tree.column(c, width=110 if c != "month" else 90, anchor=anchor, stretch=True)
+        m_vsb = ttk.Scrollbar(self.analysis2_monthly_frame, orient="vertical", command=self.analysis2_monthly_tree.yview)
+        self.analysis2_monthly_tree.configure(yscrollcommand=m_vsb.set)
+        self.analysis2_monthly_tree.grid(row=0, column=0, sticky="nsew")
+        m_vsb.grid(row=0, column=1, sticky="ns")
+
+        self.analysis2_avg_frame = ttk.LabelFrame(parent_frame, text="Averages")
+        self.analysis2_avg_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
+        self.analysis2_avg_frame.columnconfigure(0, weight=1)
+        avg_cols = ("year", "avg_gain", "avg_loss", "win_pct", "loss_pct", "wins", "losses", "trades", "lg_gain", "lg_loss", "avg_days_gain", "avg_days_loss")
+        self.analysis2_avg_tree = ttk.Treeview(self.analysis2_avg_frame, columns=avg_cols, show="headings", height=1)
+        avg_headings = {
+            "year": "Year",
+            "avg_gain": "Avg. Gain %",
+            "avg_loss": "Avg. Loss %",
+            "win_pct": "Win %",
+            "loss_pct": "Loss %",
+            "wins": "Wins",
+            "losses": "Losses",
+            "trades": "# Trades",
+            "lg_gain": "LG Gain",
+            "lg_loss": "LG Loss",
+            "avg_days_gain": "Avg. Days Gain",
+            "avg_days_loss": "Avg. Days Loss",
+        }
+        for c in avg_cols:
+            anchor = tk.W if c == "year" else tk.E
+            self.analysis2_avg_tree.heading(c, text=avg_headings[c])
+            self.analysis2_avg_tree.column(c, width=95 if c not in {"year", "avg_days_gain", "avg_days_loss"} else 100, anchor=anchor, stretch=True)
+        self.analysis2_avg_tree.grid(row=0, column=0, sticky="ew")
+
+        self.analysis2_detail_frame = ttk.LabelFrame(parent_frame, text="Monthly Stats")
+        self.analysis2_detail_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
+        self.analysis2_detail_frame.columnconfigure(0, weight=1)
+        self.analysis2_detail_frame.rowconfigure(0, weight=1)
+        detail_cols = ("month", "avg_gain", "avg_loss", "win_pct", "loss_pct", "wins", "losses", "trades", "lg_gain", "lg_loss", "avg_days_gain", "avg_days_loss")
+        self.analysis2_detail_tree = ttk.Treeview(self.analysis2_detail_frame, columns=detail_cols, show="headings", height=10)
+        detail_headings = avg_headings.copy()
+        detail_headings["month"] = "Month"
+        for c in detail_cols:
+            anchor = tk.W if c == "month" else tk.E
+            self.analysis2_detail_tree.heading(c, text=detail_headings[c])
+            self.analysis2_detail_tree.column(c, width=95 if c != "month" else 90, anchor=anchor, stretch=True)
+        d_vsb = ttk.Scrollbar(self.analysis2_detail_frame, orient="vertical", command=self.analysis2_detail_tree.yview)
+        self.analysis2_detail_tree.configure(yscrollcommand=d_vsb.set)
+        self.analysis2_detail_tree.grid(row=0, column=0, sticky="nsew")
+        d_vsb.grid(row=0, column=1, sticky="ns")
+
+        self.update_analysis_two_view()
+
+    def _analysis2_filtered_trades(self) -> List[TradeEntry]:
+        account_filter = self.account_var.get()
+        closed_only = self.closed_only_var.get()
+        entry_strategy_filter = self.entry_strategy_filter_var.get()
+        exit_strategy_filter = self.exit_strategy_filter_var.get()
+        exit_start_date = getattr(self, "exit_start_date", None)
+        exit_end_date = getattr(self, "exit_end_date", None)
+        symbol_filter_tokens = self._parsed_symbol_filter()
+        top_set = getattr(self, "top_filter_set", None)
+
+        def matches_strategy_filters(trade: TradeEntry) -> bool:
+            key = self.model.compute_key(trade)
+            if entry_strategy_filter and entry_strategy_filter != "all":
+                trade_entry_strategy = self.model.entry_strategies.get(key, "")
+                if entry_strategy_filter.lower() not in trade_entry_strategy.lower():
+                    return False
+            if exit_strategy_filter and exit_strategy_filter != "all":
+                trade_exit_strategy = self.model.exit_strategies.get(key, "")
+                if exit_strategy_filter.lower() not in trade_exit_strategy.lower():
+                    return False
+            return True
+
+        filtered: List[TradeEntry] = []
+        for idx, trade in enumerate(self.model.trades):
+            if top_set is not None and idx not in top_set:
+                continue
+            if not trade.is_closed:
+                continue
+            if not matches_strategy_filters(trade):
+                continue
+            if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
+                continue
+            if account_filter and account_filter != "all" and trade.account_number != account_filter:
+                continue
+            if self.start_date and trade.entry_date.date() < self.start_date:
+                continue
+            if self.end_date and trade.entry_date.date() > self.end_date:
+                continue
+            if exit_start_date or exit_end_date:
+                if not trade.exit_date:
+                    continue
+                exit_date = trade.exit_date.date()
+                if exit_start_date and exit_date < exit_start_date:
+                    continue
+                if exit_end_date and exit_date > exit_end_date:
+                    continue
+            if closed_only and not trade.exit_date:
+                continue
+            filtered.append(trade)
+        return filtered
+
+    def _analysis2_get_starting_balance(self, year: int) -> Optional[float]:
+        account = self.account_var.get()
+        if account == "all":
+            total = 0.0
+            found = False
+            for acct, year_map in self.analysis2_starting_balances.items():
+                if year in year_map:
+                    total += float(year_map[year])
+                    found = True
+            return total if found else None
+        return self.analysis2_starting_balances.get(account, {}).get(year)
+
+    @staticmethod
+    def _analysis2_stats_for_trades(trades: List[TradeEntry]) -> dict:
+        wins = [t for t in trades if (t.pnl or 0.0) > 1e-8]
+        losses = [t for t in trades if (t.pnl or 0.0) < -1e-8]
+        num_wins = len(wins)
+        num_losses = len(losses)
+        num_trades = len(trades)
+        denom = (num_wins + num_losses)
+        win_pct = (num_wins / denom * 100.0) if denom else 0.0
+        loss_pct = (num_losses / denom * 100.0) if denom else 0.0
+        win_pcts = [t.pnl_pct for t in wins if t.pnl_pct is not None]
+        loss_pcts = [abs(t.pnl_pct) for t in losses if t.pnl_pct is not None]
+        avg_gain = sum(win_pcts) / len(win_pcts) if win_pcts else 0.0
+        avg_loss = sum(loss_pcts) / len(loss_pcts) if loss_pcts else 0.0
+        lg_gain = max(win_pcts) if win_pcts else 0.0
+        lg_loss = max(loss_pcts) if loss_pcts else 0.0
+        win_days = [t.hold_period or 0 for t in wins]
+        loss_days = [t.hold_period or 0 for t in losses]
+        avg_days_gain = sum(win_days) / len(win_days) if win_days else 0.0
+        avg_days_loss = sum(loss_days) / len(loss_days) if loss_days else 0.0
+        return {
+            "avg_gain": avg_gain,
+            "avg_loss": avg_loss,
+            "win_pct": win_pct,
+            "loss_pct": loss_pct,
+            "wins": num_wins,
+            "losses": num_losses,
+            "trades": num_trades,
+            "lg_gain": lg_gain,
+            "lg_loss": lg_loss,
+            "avg_days_gain": avg_days_gain,
+            "avg_days_loss": avg_days_loss,
+        }
+
+    def _analysis2_set_balance_controls_state(self) -> None:
+        account = self.account_var.get()
+        state = "normal" if account != "all" else "disabled"
+        self.analysis2_start_balance_entry.configure(state=state)
+        self.analysis2_save_balance_btn.configure(state=state)
+        self.analysis2_clear_balance_btn.configure(state=state)
+        if account == "all":
+            self.analysis2_start_balance_var.set("")
+
+    def _analysis2_sync_start_balance_entry(self, year: int) -> None:
+        bal = self._analysis2_get_starting_balance(year)
+        if bal is None:
+            self.analysis2_start_balance_var.set("")
+        else:
+            self.analysis2_start_balance_var.set(f"{bal:.2f}")
+
+    def _analysis2_save_starting_balance(self) -> None:
+        account = self.account_var.get()
+        if account == "all":
+            messagebox.showinfo("Select Account", "Select a specific account to save a starting balance.")
+            return
+        year_str = (self.analysis2_year_var.get() or "").strip()
+        if not year_str:
+            messagebox.showinfo("Select Year", "Select a year to save a starting balance.")
+            return
+        try:
+            year = int(year_str)
+        except ValueError:
+            messagebox.showwarning("Invalid Year", "Year must be a number.")
+            return
+        raw = (self.analysis2_start_balance_var.get() or "").replace(",", "").strip()
+        if not raw:
+            messagebox.showinfo("Enter Balance", "Enter a starting balance before saving.")
+            return
+        try:
+            balance = float(raw)
+        except ValueError:
+            messagebox.showwarning("Invalid Balance", "Starting balance must be a number.")
+            return
+        if balance <= 0:
+            messagebox.showwarning("Invalid Balance", "Starting balance must be greater than 0.")
+            return
+        self.analysis2_starting_balances.setdefault(account, {})[year] = balance
+        self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+        self.update_analysis_two_view()
+
+    def _analysis2_clear_starting_balance(self) -> None:
+        account = self.account_var.get()
+        year_str = (self.analysis2_year_var.get() or "").strip()
+        if not year_str:
+            return
+        try:
+            year = int(year_str)
+        except ValueError:
+            return
+        if account in self.analysis2_starting_balances and year in self.analysis2_starting_balances[account]:
+            del self.analysis2_starting_balances[account][year]
+            if not self.analysis2_starting_balances[account]:
+                del self.analysis2_starting_balances[account]
+            self.model.save_state(self.persist_path, filter_state=self._current_filter_state())
+        self.analysis2_start_balance_var.set("")
+        self.update_analysis_two_view()
+
+    def update_analysis_two_view(self) -> None:
+        if not hasattr(self, "analysis2_monthly_tree"):
+            return
+        self._analysis2_set_balance_controls_state()
+
+        if hasattr(self, "analysis2_account_combo"):
+            values = list(self.account_dropdown["values"]) if hasattr(self, "account_dropdown") else []
+            if not values:
+                values = ["all"] + sorted({tx.account_number for tx in self.model.transactions})
+            self.analysis2_account_combo["values"] = values
+            if self.account_var.get() not in values:
+                self.account_var.set("all")
+
+        trades = self._analysis2_filtered_trades()
+        years = sorted({t.exit_date.year for t in trades if t.exit_date})
+        year_values = [str(y) for y in years]
+        self.analysis2_year_combo["values"] = year_values
+
+        if not years:
+            self.analysis2_year_var.set("")
+            self.analysis2_start_balance_var.set("")
+            for tree in (self.analysis2_monthly_tree, self.analysis2_avg_tree, self.analysis2_detail_tree):
+                tree.delete(*tree.get_children())
+            self.analysis2_monthly_frame.configure(text="Monthly Returns")
+            return
+
+        if self.analysis2_year_var.get() not in year_values:
+            self.analysis2_year_var.set(str(years[-1]))
+        year = int(self.analysis2_year_var.get())
+        self.analysis2_monthly_frame.configure(text=f"Monthly Returns ({year})")
+        self._analysis2_sync_start_balance_entry(year)
+
+        year_trades = [t for t in trades if t.exit_date and t.exit_date.year == year]
+        month_map: Dict[int, List[TradeEntry]] = {m: [] for m in range(1, 13)}
+        for t in year_trades:
+            if t.exit_date:
+                month_map[t.exit_date.month].append(t)
+
+        starting_balance = self._analysis2_get_starting_balance(year)
+        cumulative_pnl = 0.0
+
+        self.analysis2_monthly_tree.delete(*self.analysis2_monthly_tree.get_children())
+        for m in range(1, 13):
+            month_trades = month_map[m]
+            month_pnl = sum(t.pnl or 0.0 for t in month_trades)
+            cumulative_pnl += month_pnl
+
+            month_label = dt.date(year, m, 1).strftime("%b")
+            if starting_balance and starting_balance > 0:
+                equity_start = starting_balance + (cumulative_pnl - month_pnl)
+                month_return = (month_pnl / equity_start) if equity_start != 0 else 0.0
+                cumulative_return = cumulative_pnl / starting_balance
+                if cumulative_return <= -1:
+                    prorated_return = -1.0
+                else:
+                    prorated_return = (1 + cumulative_return) ** (12 / m) - 1
+                month_return_str = f"{month_return * 100:.2f}%"
+                cum_return_str = f"{cumulative_return * 100:.2f}%"
+                pro_return_str = f"{prorated_return * 100:.2f}%"
+            else:
+                month_return_str = "-"
+                cum_return_str = "-"
+                pro_return_str = "-"
+
+            self.analysis2_monthly_tree.insert("", "end", values=(
+                month_label,
+                month_return_str,
+                cum_return_str,
+                pro_return_str,
+            ))
+
+        self.analysis2_avg_tree.delete(*self.analysis2_avg_tree.get_children())
+        avg_stats = self._analysis2_stats_for_trades(year_trades)
+        self.analysis2_avg_tree.insert("", "end", values=(
+            year,
+            f"{avg_stats['avg_gain']:.2f}%",
+            f"{avg_stats['avg_loss']:.2f}%",
+            f"{avg_stats['win_pct']:.1f}%",
+            f"{avg_stats['loss_pct']:.1f}%",
+            avg_stats["wins"],
+            avg_stats["losses"],
+            avg_stats["trades"],
+            f"{avg_stats['lg_gain']:.2f}%",
+            f"{avg_stats['lg_loss']:.2f}%",
+            f"{avg_stats['avg_days_gain']:.1f}",
+            f"{avg_stats['avg_days_loss']:.1f}",
+        ))
+
+        self.analysis2_detail_tree.delete(*self.analysis2_detail_tree.get_children())
+        for m in range(1, 13):
+            month_trades = month_map[m]
+            stats = self._analysis2_stats_for_trades(month_trades)
+            month_label = dt.date(year, m, 1).strftime("%b-%y")
+            self.analysis2_detail_tree.insert("", "end", values=(
+                month_label,
+                f"{stats['avg_gain']:.2f}%",
+                f"{stats['avg_loss']:.2f}%",
+                f"{stats['win_pct']:.1f}%",
+                f"{stats['loss_pct']:.1f}%",
+                stats["wins"],
+                stats["losses"],
+                stats["trades"],
+                f"{stats['lg_gain']:.2f}%",
+                f"{stats['lg_loss']:.2f}%",
+                f"{stats['avg_days_gain']:.1f}",
+                f"{stats['avg_days_loss']:.1f}",
+            ))
+
     def _create_analysis_tree(self, parent: ttk.Frame, title: str) -> Tuple[ttk.LabelFrame, ttk.Treeview]:
         frame = ttk.LabelFrame(parent, text=title)
         frame.columnconfigure(0, weight=1)
@@ -1847,6 +2221,8 @@ class TradeJournalApp:
             if tab_text == "Analysis" and hasattr(self, "analysis_account_combo"):
                 self.refresh_analysis_accounts()
                 self.refresh_analysis_view()
+            if tab_text == "Analysis 2":
+                self.update_analysis_two_view()
         except Exception:
             pass
 
@@ -4071,6 +4447,8 @@ class TradeJournalApp:
             "entry_strategy_filter": self.entry_strategy_filter_var.get(),
             "exit_strategy_filter": self.exit_strategy_filter_var.get(),
             "chart_visible": self.chart_visible.get(),
+            "analysis2_starting_balances": self.analysis2_starting_balances,
+            "analysis2_year": self.analysis2_year_var.get(),
         }
 
     def _reset_text_sizes(self) -> None:
@@ -5825,6 +6203,10 @@ class TradeJournalApp:
                     self.symbol_filter_var.set(filter_state.get('symbol_filter', ''))
                     self.entry_strategy_filter_var.set(filter_state.get('entry_strategy_filter', 'all'))
                     self.exit_strategy_filter_var.set(filter_state.get('exit_strategy_filter', 'all'))
+                    if isinstance(filter_state.get('analysis2_starting_balances'), dict):
+                        self.analysis2_starting_balances = filter_state.get('analysis2_starting_balances', {})
+                    if filter_state.get('analysis2_year'):
+                        self.analysis2_year_var.set(str(filter_state.get('analysis2_year')))
                     if 'chart_visible' in filter_state:
                         self.chart_visible.set(bool(filter_state.get('chart_visible')))
                     # Apply date filter if dates were set
@@ -5871,6 +6253,8 @@ class TradeJournalApp:
                 'exit_strategy_filter': self.exit_strategy_filter_var.get(),
                 'chart_symbol': self.chart_symbol_var.get(),
                 'chart_visible': self.chart_visible.get(),
+                'analysis2_starting_balances': self.analysis2_starting_balances,
+                'analysis2_year': self.analysis2_year_var.get(),
             }
             self.model.save_state(self.persist_path, filter_state)
         except Exception:
@@ -6481,6 +6865,10 @@ class TradeJournalApp:
             canvas_widget = self.equity_canvas.get_tk_widget()
             canvas_widget.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self.equity_canvas.draw()
+
+        # Refresh Analysis Two view to reflect current filters
+        if hasattr(self, "analysis2_monthly_tree"):
+            self.update_analysis_two_view()
 
     def export_journal(self) -> None:
         """Export the current trade journal to CSV or Excel."""
