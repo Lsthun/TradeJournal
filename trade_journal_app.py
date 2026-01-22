@@ -1179,6 +1179,7 @@ class TradeJournalApp:
         self.analysis2_start_balance_var = tk.StringVar(value="")
         self.analysis2_account_label_var = tk.StringVar(value="all")
         self.analysis2_avg_visible = True
+        self.analysis2_monthly_visible = True
         # UI elements
         self._build_ui()
         # Sorting state: which column and whether descending
@@ -1298,6 +1299,7 @@ class TradeJournalApp:
         start_entry = ttk.Entry(top_frame, textvariable=self.start_date_var, width=12)
         # Bind a mouse click to open date picker
         start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.start_date_var, source_widgets=[start_entry, start_pick_btn]))
+        start_entry.bind("<Return>", lambda e: self.apply_date_filter())
         start_entry.grid(row=2, column=1, padx=(0, 2), pady=2)
         # Button to open date picker explicitly
         start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.start_date_var, source_widgets=[start_entry, start_pick_btn]))
@@ -1306,6 +1308,7 @@ class TradeJournalApp:
         self.end_date_var = tk.StringVar(value="")
         end_entry = ttk.Entry(top_frame, textvariable=self.end_date_var, width=12)
         end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.end_date_var, source_widgets=[end_entry, end_pick_btn]))
+        end_entry.bind("<Return>", lambda e: self.apply_date_filter())
         end_entry.grid(row=2, column=4, padx=(0, 2), pady=2)
         end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.end_date_var, source_widgets=[end_entry, end_pick_btn]))
         end_pick_btn.grid(row=2, column=5, padx=(0, 5), pady=2)
@@ -1319,6 +1322,7 @@ class TradeJournalApp:
         self.exit_start_date_var = tk.StringVar(value="")
         exit_start_entry = ttk.Entry(top_frame, textvariable=self.exit_start_date_var, width=12)
         exit_start_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_start_date_var, source_widgets=[exit_start_entry, exit_start_pick_btn]))
+        exit_start_entry.bind("<Return>", lambda e: self.apply_date_filter())
         exit_start_entry.grid(row=3, column=1, padx=(0, 2), pady=2)
         exit_start_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_start_date_var, source_widgets=[exit_start_entry, exit_start_pick_btn]))
         exit_start_pick_btn.grid(row=3, column=2, padx=(0, 5), pady=2)
@@ -1326,6 +1330,7 @@ class TradeJournalApp:
         self.exit_end_date_var = tk.StringVar(value="")
         exit_end_entry = ttk.Entry(top_frame, textvariable=self.exit_end_date_var, width=12)
         exit_end_entry.bind("<Button-1>", lambda e: self.open_date_picker(self.exit_end_date_var, source_widgets=[exit_end_entry, exit_end_pick_btn]))
+        exit_end_entry.bind("<Return>", lambda e: self.apply_date_filter())
         exit_end_entry.grid(row=3, column=4, padx=(0, 2), pady=2)
         exit_end_pick_btn = ttk.Button(top_frame, text="📅", width=3, command=lambda: self.open_date_picker(self.exit_end_date_var, source_widgets=[exit_end_entry, exit_end_pick_btn]))
         exit_end_pick_btn.grid(row=3, column=5, padx=(0, 5), pady=2)
@@ -1846,7 +1851,13 @@ class TradeJournalApp:
         self.analysis2_monthly_frame = ttk.LabelFrame(parent_frame, text="Monthly Returns")
         self.analysis2_monthly_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.analysis2_monthly_frame.columnconfigure(0, weight=1)
-        self.analysis2_monthly_frame.rowconfigure(0, weight=1)
+        self.analysis2_monthly_frame.rowconfigure(1, weight=1)
+
+        monthly_header = ttk.Frame(self.analysis2_monthly_frame)
+        monthly_header.grid(row=0, column=0, sticky="ew")
+        monthly_header.columnconfigure(0, weight=1)
+        self.analysis2_monthly_toggle_btn = ttk.Button(monthly_header, text="−", width=2, command=self._toggle_analysis2_monthly)
+        self.analysis2_monthly_toggle_btn.grid(row=0, column=1, sticky="e", padx=2, pady=2)
 
         monthly_cols = ("month", "month_return", "cum_return", "prorated_return")
         self.analysis2_monthly_tree = ttk.Treeview(self.analysis2_monthly_frame, columns=monthly_cols, show="headings", height=8)
@@ -1862,8 +1873,8 @@ class TradeJournalApp:
             self.analysis2_monthly_tree.column(c, width=110 if c != "month" else 90, anchor=anchor, stretch=True)
         m_vsb = ttk.Scrollbar(self.analysis2_monthly_frame, orient="vertical", command=self.analysis2_monthly_tree.yview)
         self.analysis2_monthly_tree.configure(yscrollcommand=m_vsb.set)
-        self.analysis2_monthly_tree.grid(row=0, column=0, sticky="nsew")
-        m_vsb.grid(row=0, column=1, sticky="ns")
+        self.analysis2_monthly_tree.grid(row=1, column=0, sticky="nsew")
+        m_vsb.grid(row=1, column=1, sticky="ns")
 
         self.analysis2_avg_frame = ttk.LabelFrame(parent_frame, text="Averages")
         self.analysis2_avg_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
@@ -1915,6 +1926,8 @@ class TradeJournalApp:
 
         filter_btn = ttk.Button(self.analysis2_detail_frame, text="Filter Journal to Selected Months", command=self._analysis2_filter_journal_to_selected_months)
         filter_btn.grid(row=1, column=0, sticky="e", padx=2, pady=4)
+        clear_filter_btn = ttk.Button(self.analysis2_detail_frame, text="Clear Monthly Filter", command=self._analysis2_clear_month_filter)
+        clear_filter_btn.grid(row=1, column=1, sticky="e", padx=2, pady=4)
 
         self.update_analysis_two_view()
 
@@ -2024,6 +2037,24 @@ class TradeJournalApp:
             self.analysis2_avg_tree.grid()
             self.analysis2_avg_toggle_btn.config(text="−")
             self.analysis2_avg_visible = True
+
+    def _toggle_analysis2_monthly(self) -> None:
+        if getattr(self, "analysis2_monthly_visible", True):
+            self.analysis2_monthly_tree.grid_remove()
+            try:
+                self.analysis2_monthly_frame.grid_slaves(row=1, column=1)[0].grid_remove()
+            except Exception:
+                pass
+            self.analysis2_monthly_toggle_btn.config(text="+")
+            self.analysis2_monthly_visible = False
+        else:
+            self.analysis2_monthly_tree.grid()
+            try:
+                self.analysis2_monthly_frame.grid_slaves(row=1, column=1)[0].grid()
+            except Exception:
+                pass
+            self.analysis2_monthly_toggle_btn.config(text="−")
+            self.analysis2_monthly_visible = True
 
     def _analysis2_set_balance_controls_state(self) -> None:
         account = self.account_var.get()
@@ -2224,6 +2255,16 @@ class TradeJournalApp:
         if not indices:
             return
         self.top_filter_set = indices
+        self.populate_table()
+        self.update_summary_and_chart()
+        try:
+            self.notebook.select(self.journal_tab)
+        except Exception:
+            pass
+
+    def _analysis2_clear_month_filter(self) -> None:
+        if hasattr(self, 'top_filter_set'):
+            self.top_filter_set = None
         self.populate_table()
         self.update_summary_and_chart()
         try:
