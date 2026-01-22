@@ -1178,6 +1178,7 @@ class TradeJournalApp:
         self.analysis2_year_var = tk.StringVar(value="")
         self.analysis2_start_balance_var = tk.StringVar(value="")
         self.analysis2_account_label_var = tk.StringVar(value="all")
+        self.analysis2_avg_visible = True
         # UI elements
         self._build_ui()
         # Sorting state: which column and whether descending
@@ -1867,6 +1868,12 @@ class TradeJournalApp:
         self.analysis2_avg_frame = ttk.LabelFrame(parent_frame, text="Averages")
         self.analysis2_avg_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
         self.analysis2_avg_frame.columnconfigure(0, weight=1)
+        self.analysis2_avg_frame.rowconfigure(1, weight=1)
+        avg_header = ttk.Frame(self.analysis2_avg_frame)
+        avg_header.grid(row=0, column=0, sticky="ew")
+        avg_header.columnconfigure(0, weight=1)
+        self.analysis2_avg_toggle_btn = ttk.Button(avg_header, text="−", width=2, command=self._toggle_analysis2_avg)
+        self.analysis2_avg_toggle_btn.grid(row=0, column=1, sticky="e", padx=2, pady=2)
         avg_cols = ("year", "avg_gain", "avg_loss", "win_pct", "loss_pct", "wins", "losses", "trades", "lg_gain", "lg_loss", "avg_days_gain", "avg_days_loss")
         self.analysis2_avg_tree = ttk.Treeview(self.analysis2_avg_frame, columns=avg_cols, show="headings", height=1)
         avg_headings = {
@@ -1887,14 +1894,14 @@ class TradeJournalApp:
             anchor = tk.W if c == "year" else tk.E
             self.analysis2_avg_tree.heading(c, text=avg_headings[c])
             self.analysis2_avg_tree.column(c, width=95 if c not in {"year", "avg_days_gain", "avg_days_loss"} else 100, anchor=anchor, stretch=True)
-        self.analysis2_avg_tree.grid(row=0, column=0, sticky="ew")
+        self.analysis2_avg_tree.grid(row=1, column=0, sticky="ew")
 
         self.analysis2_detail_frame = ttk.LabelFrame(parent_frame, text="Monthly Stats")
         self.analysis2_detail_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
         self.analysis2_detail_frame.columnconfigure(0, weight=1)
         self.analysis2_detail_frame.rowconfigure(0, weight=1)
         detail_cols = ("month", "avg_gain", "avg_loss", "win_pct", "loss_pct", "wins", "losses", "trades", "lg_gain", "lg_loss", "avg_days_gain", "avg_days_loss")
-        self.analysis2_detail_tree = ttk.Treeview(self.analysis2_detail_frame, columns=detail_cols, show="headings", height=10)
+        self.analysis2_detail_tree = ttk.Treeview(self.analysis2_detail_frame, columns=detail_cols, show="headings", height=10, selectmode="extended")
         detail_headings = avg_headings.copy()
         detail_headings["month"] = "Month"
         for c in detail_cols:
@@ -1906,9 +1913,12 @@ class TradeJournalApp:
         self.analysis2_detail_tree.grid(row=0, column=0, sticky="nsew")
         d_vsb.grid(row=0, column=1, sticky="ns")
 
+        filter_btn = ttk.Button(self.analysis2_detail_frame, text="Filter Journal to Selected Months", command=self._analysis2_filter_journal_to_selected_months)
+        filter_btn.grid(row=1, column=0, sticky="e", padx=2, pady=4)
+
         self.update_analysis_two_view()
 
-    def _analysis2_filtered_trades(self) -> List[TradeEntry]:
+    def _analysis2_filtered_trades(self) -> List[Tuple[int, TradeEntry]]:
         account_filter = self.account_var.get()
         closed_only = self.closed_only_var.get()
         entry_strategy_filter = self.entry_strategy_filter_var.get()
@@ -1930,7 +1940,7 @@ class TradeJournalApp:
                     return False
             return True
 
-        filtered: List[TradeEntry] = []
+        filtered: List[Tuple[int, TradeEntry]] = []
         for idx, trade in enumerate(self.model.trades):
             if top_set is not None and idx not in top_set:
                 continue
@@ -1956,7 +1966,7 @@ class TradeJournalApp:
                     continue
             if closed_only and not trade.exit_date:
                 continue
-            filtered.append(trade)
+            filtered.append((idx, trade))
         return filtered
 
     def _analysis2_get_starting_balance(self, year: int) -> Optional[float]:
@@ -2004,6 +2014,16 @@ class TradeJournalApp:
             "avg_days_gain": avg_days_gain,
             "avg_days_loss": avg_days_loss,
         }
+
+    def _toggle_analysis2_avg(self) -> None:
+        if getattr(self, "analysis2_avg_visible", True):
+            self.analysis2_avg_tree.grid_remove()
+            self.analysis2_avg_toggle_btn.config(text="+")
+            self.analysis2_avg_visible = False
+        else:
+            self.analysis2_avg_tree.grid()
+            self.analysis2_avg_toggle_btn.config(text="−")
+            self.analysis2_avg_visible = True
 
     def _analysis2_set_balance_controls_state(self) -> None:
         account = self.account_var.get()
@@ -2081,8 +2101,9 @@ class TradeJournalApp:
             if self.account_var.get() not in values:
                 self.account_var.set("all")
 
-        trades = self._analysis2_filtered_trades()
-        years = sorted({t.exit_date.year for t in trades if t.exit_date})
+        trade_items = self._analysis2_filtered_trades()
+        trades_only = [t for _, t in trade_items]
+        years = sorted({t.exit_date.year for t in trades_only if t.exit_date})
         year_values = [str(y) for y in years]
         self.analysis2_year_combo["values"] = year_values
 
@@ -2100,11 +2121,13 @@ class TradeJournalApp:
         self.analysis2_monthly_frame.configure(text=f"Monthly Returns ({year})")
         self._analysis2_sync_start_balance_entry(year)
 
-        year_trades = [t for t in trades if t.exit_date and t.exit_date.year == year]
+        year_trades = [t for t in trades_only if t.exit_date and t.exit_date.year == year]
         month_map: Dict[int, List[TradeEntry]] = {m: [] for m in range(1, 13)}
-        for t in year_trades:
-            if t.exit_date:
+        self.analysis2_month_trade_indices: Dict[int, List[int]] = {m: [] for m in range(1, 13)}
+        for idx, t in trade_items:
+            if t.exit_date and t.exit_date.year == year:
                 month_map[t.exit_date.month].append(t)
+                self.analysis2_month_trade_indices[t.exit_date.month].append(idx)
 
         starting_balance = self._analysis2_get_starting_balance(year)
         cumulative_pnl = 0.0
@@ -2161,7 +2184,7 @@ class TradeJournalApp:
             month_trades = month_map[m]
             stats = self._analysis2_stats_for_trades(month_trades)
             month_label = dt.date(year, m, 1).strftime("%b-%y")
-            self.analysis2_detail_tree.insert("", "end", values=(
+            self.analysis2_detail_tree.insert("", "end", iid=f"{year}-{m:02d}", values=(
                 month_label,
                 f"{stats['avg_gain']:.2f}%",
                 f"{stats['avg_loss']:.2f}%",
@@ -2175,6 +2198,38 @@ class TradeJournalApp:
                 f"{stats['avg_days_gain']:.1f}",
                 f"{stats['avg_days_loss']:.1f}",
             ))
+
+    def _analysis2_filter_journal_to_selected_months(self) -> None:
+        if not hasattr(self, "analysis2_detail_tree"):
+            return
+        selected = self.analysis2_detail_tree.selection()
+        if not selected:
+            return
+        month_keys: Set[Tuple[int, int]] = set()
+        for item_id in selected:
+            try:
+                year_str, month_str = item_id.split("-")
+                month_keys.add((int(year_str), int(month_str)))
+            except Exception:
+                continue
+        if not month_keys:
+            return
+        indices: Set[int] = set()
+        for idx, trade in self._analysis2_filtered_trades():
+            if not trade.exit_date:
+                continue
+            key = (trade.exit_date.year, trade.exit_date.month)
+            if key in month_keys:
+                indices.add(idx)
+        if not indices:
+            return
+        self.top_filter_set = indices
+        self.populate_table()
+        self.update_summary_and_chart()
+        try:
+            self.notebook.select(self.journal_tab)
+        except Exception:
+            pass
 
     def _create_analysis_tree(self, parent: ttk.Frame, title: str) -> Tuple[ttk.LabelFrame, ttk.Treeview]:
         frame = ttk.LabelFrame(parent, text=title)
