@@ -567,12 +567,12 @@ class TradeJournalModel:
     def _save_trade_metadata_before_matching(self) -> dict:
         """Save metadata (notes, screenshots, strategies) indexed by entry-level properties.
         
-        Returns a dict mapping (account, symbol, entry_date_iso, entry_price, qty) to metadata.
-        This allows metadata to be preserved even if exit details change during re-matching.
-        """
-        metadata_map = {}
+        Returns a dict with two maps so we can restore even if quantity changes during
+        partial fills: "strict" keyed by (acct, symbol, entry_date_iso, entry_price, qty)
+        and "relaxed" keyed by (acct, symbol, entry_date_iso, entry_price)."""
+        strict_map = {}
+        relaxed_map = {}
         for trade in self.trades:
-            # Create a key based on entry-level properties that don't change
             entry_key = (
                 trade.account_number or "",
                 trade.symbol or "",
@@ -580,35 +580,40 @@ class TradeJournalModel:
                 round(trade.entry_price, 6),
                 round(trade.quantity, 6),
             )
-            # Compute the current full key used for notes/screenshots/strategies
+            relaxed_key = (
+                trade.account_number or "",
+                trade.symbol or "",
+                trade.entry_date.isoformat(),
+                round(trade.entry_price, 6),
+            )
             full_key = self.compute_key(trade)
-            
+
             metadata = {}
-            # Save note if it exists
             if full_key in self.notes:
                 metadata['note'] = self.notes[full_key]
-            # Save entry strategy if it exists
             if full_key in self.entry_strategies:
                 metadata['entry_strategy'] = self.entry_strategies[full_key]
-            # Save exit strategy if it exists
             if full_key in self.exit_strategies:
                 metadata['exit_strategy'] = self.exit_strategies[full_key]
-            # Save screenshots if they exist
             if full_key in self.screenshots:
                 metadata['screenshots'] = self.screenshots[full_key]
-            
+
             if metadata:
-                metadata_map[entry_key] = metadata
-        
-        return metadata_map
+                strict_map[entry_key] = metadata
+                # Only record a relaxed mapping if not already present to avoid collisions
+                relaxed_map.setdefault(relaxed_key, metadata)
+        return {"strict": strict_map, "relaxed": relaxed_map}
 
     def _restore_trade_metadata_after_matching(self, metadata_map: dict) -> None:
         """Restore metadata to trades after re-matching based on entry-level properties.
         
-        Maps saved metadata from entry_key to new trades with matching entry properties.
+        Uses strict matching first, then falls back to relaxed matching (ignores quantity)
+        to preserve strategies/notes for partial fills that change quantity during matching.
         """
+        strict_map = metadata_map.get("strict", {}) if isinstance(metadata_map, dict) else {}
+        relaxed_map = metadata_map.get("relaxed", {}) if isinstance(metadata_map, dict) else {}
+
         for trade in self.trades:
-            # Create the same entry-level key
             entry_key = (
                 trade.account_number or "",
                 trade.symbol or "",
@@ -616,24 +621,25 @@ class TradeJournalModel:
                 round(trade.entry_price, 6),
                 round(trade.quantity, 6),
             )
-            
-            if entry_key in metadata_map:
+            relaxed_key = (
+                trade.account_number or "",
+                trade.symbol or "",
+                trade.entry_date.isoformat(),
+                round(trade.entry_price, 6),
+            )
+
+            saved_metadata = strict_map.get(entry_key)
+            if saved_metadata is None:
+                saved_metadata = relaxed_map.get(relaxed_key)
+
+            if saved_metadata:
                 full_key = self.compute_key(trade)
-                saved_metadata = metadata_map[entry_key]
-                
-                # Restore note
                 if 'note' in saved_metadata:
                     self.notes[full_key] = saved_metadata['note']
-                
-                # Restore entry strategy
                 if 'entry_strategy' in saved_metadata:
                     self.entry_strategies[full_key] = saved_metadata['entry_strategy']
-                
-                # Restore exit strategy
                 if 'exit_strategy' in saved_metadata:
                     self.exit_strategies[full_key] = saved_metadata['exit_strategy']
-                
-                # Restore screenshots
                 if 'screenshots' in saved_metadata:
                     self.screenshots[full_key] = saved_metadata['screenshots']
 
