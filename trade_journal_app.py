@@ -1186,6 +1186,8 @@ class TradeJournalApp:
         self.analysis2_account_label_var = tk.StringVar(value="all")
         self.analysis2_avg_visible = True
         self.analysis2_monthly_visible = True
+        self.open_only_var = tk.BooleanVar(value=False)
+        self.include_open_equity_var = tk.BooleanVar(value=False)
         # UI elements
         self._build_ui()
         # Sorting state: which column and whether descending
@@ -1232,7 +1234,7 @@ class TradeJournalApp:
         self.top_controls_frame = top_frame
         
         # Make all columns expand equally to use available space
-        for i in range(11):
+        for i in range(13):
             top_frame.columnconfigure(i, weight=1)
 
         # Row 0: Main action buttons
@@ -1265,39 +1267,50 @@ class TradeJournalApp:
         self.account_dropdown.grid(row=0, column=7, padx=(0, 5), pady=2)
         self.account_dropdown.bind("<<ComboboxSelected>>", self.on_account_filter_change)
 
+        # Global refresh for open positions pricing
+        self.refresh_open_prices_global_btn = ttk.Button(top_frame, text="Refresh Open Prices", command=self.refresh_open_prices_global)
+        self.refresh_open_prices_global_btn.grid(row=0, column=8, padx=(0, 5), pady=2)
+
         # Sync Alerts moved next to chart toggle on row 4
 
-        # Row 1: Group toggle + Top N filter controls
+        # Row 1: Group toggle + filters + open controls
         self.group_var = tk.BooleanVar(value=True)
         group_check = ttk.Checkbutton(top_frame, text="Group by symbol", variable=self.group_var, command=self.on_group_change)
         group_check.grid(row=1, column=0, padx=(0, 4), pady=2, sticky="w")
 
-        ttk.Label(top_frame, text="Top N:").grid(row=1, column=1, padx=(0, 2), pady=2, sticky="e")
+        self.open_only_check = ttk.Checkbutton(top_frame, text="Open positions only", variable=self.open_only_var, command=self.on_open_only_change)
+        self.open_only_check.grid(row=1, column=1, padx=(0, 4), pady=2, sticky="w")
+
+        ttk.Label(top_frame, text="Top N:").grid(row=1, column=2, padx=(0, 2), pady=2, sticky="e")
         
         # Load saved settings
         saved_settings = load_chart_settings()
         
         self.top_n_var = tk.StringVar(value=saved_settings.get("top_n", ""))
         top_n_entry = ttk.Entry(top_frame, textvariable=self.top_n_var, width=5)
-        top_n_entry.grid(row=1, column=2, padx=(0, 2), pady=2)
+        top_n_entry.grid(row=1, column=3, padx=(0, 2), pady=2)
         # Filter type: None, Winners, Losers
         self.top_filter_type_var = tk.StringVar(value=saved_settings.get("top_filter_type", "None"))
         top_filter_combo = ttk.Combobox(top_frame, textvariable=self.top_filter_type_var,
                                          values=["None", "Winners", "Losers"], state="readonly", width=8)
-        top_filter_combo.grid(row=1, column=3, padx=(0, 2), pady=2)
+        top_filter_combo.grid(row=1, column=4, padx=(0, 2), pady=2)
         # Metric for winners/losers: PnL or PnL %
-        ttk.Label(top_frame, text="by:").grid(row=1, column=4, padx=(0, 2), pady=2, sticky="e")
+        ttk.Label(top_frame, text="by:").grid(row=1, column=5, padx=(0, 2), pady=2, sticky="e")
         self.top_filter_metric_var = tk.StringVar(value=saved_settings.get("top_filter_metric", "PnL"))
         top_metric_combo = ttk.Combobox(top_frame, textvariable=self.top_filter_metric_var,
                                          values=["PnL", "PnL %"], state="readonly", width=8)
-        top_metric_combo.grid(row=1, column=5, padx=(0, 2), pady=2)
+        top_metric_combo.grid(row=1, column=6, padx=(0, 2), pady=2)
         apply_top_btn = ttk.Button(top_frame, text="Apply", command=self.on_top_filter_change)
-        apply_top_btn.grid(row=1, column=6, padx=(0, 5), pady=2)
+        apply_top_btn.grid(row=1, column=7, padx=(0, 5), pady=2)
 
         # Checkbox to show only fully closed positions
         self.closed_only_var = tk.BooleanVar(value=False)
         closed_check = ttk.Checkbutton(top_frame, text="Closed positions only", variable=self.closed_only_var, command=self.on_closed_filter_change)
-        closed_check.grid(row=1, column=7, padx=(0, 5), pady=2, sticky="w")
+        closed_check.grid(row=1, column=8, padx=(0, 5), pady=2, sticky="w")
+
+        # Toggle to include open P&L in summary/equity
+        include_open_top = ttk.Checkbutton(top_frame, text="Include Open P&L", variable=self.include_open_equity_var, command=self.on_include_open_equity_change)
+        include_open_top.grid(row=1, column=9, padx=(0, 5), pady=2, sticky="w")
 
         # Row 2: Entry date filter fields
         ttk.Label(top_frame, text="Entry Start (preferred M/D/YYYY):").grid(row=2, column=0, padx=(0, 2), pady=2, sticky="e")
@@ -1672,6 +1685,12 @@ class TradeJournalApp:
         self.chart_download_btn = ttk.Button(top_frame, text="Download Data", command=self.on_download_price_data)
         self.chart_download_btn.pack(side=tk.LEFT, padx=(0, 5))
 
+        self.include_open_equity_check = ttk.Checkbutton(top_frame, text="Include Open P&L", variable=self.include_open_equity_var, command=self.update_summary_and_chart)
+        self.include_open_equity_check.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.refresh_open_prices_btn = ttk.Button(top_frame, text="Refresh Open Prices", command=self.refresh_open_prices)
+        self.refresh_open_prices_btn.pack(side=tk.LEFT, padx=(0, 5))
+
         # Status label
         self.chart_status_var = tk.StringVar(value="Ready")
         status_label = ttk.Label(top_frame, textvariable=self.chart_status_var, foreground="cyan")
@@ -1940,6 +1959,7 @@ class TradeJournalApp:
     def _analysis2_filtered_trades(self) -> List[Tuple[int, TradeEntry]]:
         account_filter = self.account_var.get()
         closed_only = self.closed_only_var.get()
+        open_only = getattr(self, "open_only_var", tk.BooleanVar(value=False)).get()
         entry_strategy_filter = self.entry_strategy_filter_var.get()
         exit_strategy_filter = self.exit_strategy_filter_var.get()
         exit_start_date = getattr(self, "exit_start_date", None)
@@ -3969,6 +3989,7 @@ class TradeJournalApp:
         self.exit_strategy_filter_combo['values'] = self.exit_strategy_all_values
         # Determine filters
         closed_only = self.closed_only_var.get()
+        open_only = self.open_only_var.get()
         account_filter = self.account_var.get()
         group_by_symbol = self.group_var.get()
         entry_strategy_filter = self.entry_strategy_filter_var.get()
@@ -4014,13 +4035,14 @@ class TradeJournalApp:
                 # Check if any filter strategy is contained in the trade strategy
                 if not any(f in trade_exit_strategy.lower() for f in filter_strategies):
                     return False
-            # Closed-only filter
+            # Closed-only / Open-only filter
             if closed_only:
                 if not trade.is_closed:
                     return False
                 if trade.buy_id < 0:
                     return False
-                if self.model.open_qty_by_buy_id.get(trade.buy_id, 0.0) > 1e-8:
+            if open_only:
+                if trade.is_closed:
                     return False
             # Date filter on entry_date (inclusive)
             if self.start_date and trade.entry_date.date() < self.start_date:
@@ -6083,46 +6105,138 @@ class TradeJournalApp:
         # Ask for confirmation
         if not messagebox.askyesno("Confirm Deletion", f"Delete {len(unique_keys)} selected trade(s)? This cannot be undone."):
             return
-        # Build set of transaction keys to remove (matching run_date, acct_num, symbol, qty, price, amount)
-        tx_keys_to_remove: set = set()
+        # Build a reliable mapping from trade key -> underlying transaction indices
+        trade_key_to_tx_indices: Dict[tuple, set] = {}
+        # Use a sorted copy of transactions (with original indices) to replay matching
+        sorted_txs = sorted(list(enumerate(self.model.transactions)), key=lambda item: item[1].run_date)
+        open_positions: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+        next_buy_id = 1
+
+        for tx_index, tx in sorted_txs:
+            key = (tx.account_number, tx.symbol)
+            if tx.is_buy:
+                buy_id = next_buy_id
+                next_buy_id += 1
+                if key not in open_positions:
+                    open_positions[key] = []
+                open_positions[key].append({
+                    "qty": tx.quantity,
+                    "price": tx.price,
+                    "date": tx.run_date,
+                    "id": buy_id,
+                    "tx_index": tx_index,
+                })
+            elif tx.is_sell:
+                remaining = abs(tx.quantity)
+                if key not in open_positions or not open_positions[key]:
+                    # Unmatched sell
+                    trade = TradeEntry(
+                        account=tx.account,
+                        account_number=tx.account_number,
+                        symbol=tx.symbol,
+                        entry_date=tx.run_date,
+                        entry_price=tx.price,
+                        exit_date=None,
+                        exit_price=None,
+                        quantity=remaining,
+                        pnl=None,
+                        hold_period=None,
+                        buy_id=-1,
+                        status="OPEN",
+                    )
+                    tkey = self.model.compute_key(trade)
+                    trade_key_to_tx_indices.setdefault(tkey, set()).add(tx_index)
+                    continue
+                while remaining > 1e-8:
+                    if not open_positions[key]:
+                        # No buys left; unmatched sell portion
+                        trade = TradeEntry(
+                            account=tx.account,
+                            account_number=tx.account_number,
+                            symbol=tx.symbol,
+                            entry_date=tx.run_date,
+                            entry_price=tx.price,
+                            exit_date=None,
+                            exit_price=None,
+                            quantity=remaining,
+                            pnl=None,
+                            hold_period=None,
+                            buy_id=-1,
+                            status="OPEN",
+                        )
+                        tkey = self.model.compute_key(trade)
+                        trade_key_to_tx_indices.setdefault(tkey, set()).add(tx_index)
+                        break
+                    buy = open_positions[key][0]
+                    matched_qty = min(buy["qty"], remaining)
+                    entry_date = buy["date"]
+                    entry_price = buy["price"]
+                    exit_date = tx.run_date
+                    exit_price = tx.price
+                    pnl = (exit_price - entry_price) * matched_qty
+                    hold_period = (exit_date - entry_date).days
+                    trade = TradeEntry(
+                        account=tx.account,
+                        account_number=tx.account_number,
+                        symbol=tx.symbol,
+                        entry_date=entry_date,
+                        entry_price=entry_price,
+                        exit_date=exit_date,
+                        exit_price=exit_price,
+                        quantity=matched_qty,
+                        pnl=pnl,
+                        hold_period=hold_period,
+                        buy_id=buy["id"],
+                        status="CLOSED",
+                    )
+                    tkey = self.model.compute_key(trade)
+                    trade_key_to_tx_indices.setdefault(tkey, set()).update({buy["tx_index"], tx_index})
+                    remaining -= matched_qty
+                    buy["qty"] -= matched_qty
+                    if buy["qty"] <= 1e-8:
+                        open_positions[key].pop(0)
+
+        # Record remaining open buys as open trades
+        for key, buys in open_positions.items():
+            acct_num, symbol = key
+            for buy in buys:
+                trade = TradeEntry(
+                    account="",
+                    account_number=acct_num,
+                    symbol=symbol,
+                    entry_date=buy["date"],
+                    entry_price=buy["price"],
+                    exit_date=None,
+                    exit_price=None,
+                    quantity=buy["qty"],
+                    pnl=None,
+                    hold_period=None,
+                    buy_id=buy["id"],
+                    status="OPEN",
+                )
+                tkey = self.model.compute_key(trade)
+                trade_key_to_tx_indices.setdefault(tkey, set()).add(buy["tx_index"])
+
+        # Collect transaction indices to delete for selected trades
+        tx_indices_to_remove: set = set()
         for key in unique_keys:
-            # Find the corresponding trade entry
-            for trade in self.model.trades:
-                if self.model.compute_key(trade) == key:
-                    # Identify underlying buy transaction (entry)
-                    buy_run_date = trade.entry_date
-                    buy_price = trade.entry_price
-                    buy_qty = trade.quantity
-                    acct_num = trade.account_number
-                    symbol = trade.symbol
-                    # Use a negative amount for buys to match the CSV (spending money)
-                    buy_amount = -buy_price * buy_qty
-                    buy_key = (buy_run_date, acct_num, symbol, buy_qty, buy_price, buy_amount)
-                    tx_keys_to_remove.add(buy_key)
-                    # If closed trade, also identify matching sell transaction
-                    if trade.exit_date and trade.exit_price is not None:
-                        sell_run_date = trade.exit_date
-                        sell_price = trade.exit_price
-                        # Negative quantity for sell
-                        sell_qty = -trade.quantity
-                        # Use a positive amount for sells (proceeds)
-                        sell_amount = sell_price * trade.quantity
-                        sell_key = (sell_run_date, acct_num, symbol, sell_qty, sell_price, sell_amount)
-                        tx_keys_to_remove.add(sell_key)
-                    break
-        # Remove transactions matching these keys
+            tx_indices_to_remove.update(trade_key_to_tx_indices.get(key, set()))
+
+        # Remove transactions by index
         new_transactions: List[Transaction] = []
-        for tx in self.model.transactions:
-            k6 = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount)
-            if k6 not in tx_keys_to_remove:
+        for idx, tx in enumerate(self.model.transactions):
+            if idx not in tx_indices_to_remove:
                 new_transactions.append(tx)
-        # Replace transactions list
         self.model.transactions = new_transactions
-        # Remove corresponding keys from seen_tx_keys
-        self.model.seen_tx_keys = {
-            k for k in self.model.seen_tx_keys
-            if not (isinstance(k, tuple) and len(k) >= 6 and (k[0], k[1], k[2], k[3], k[4], k[5]) in tx_keys_to_remove)
-        }
+
+        # Rebuild seen_tx_keys from remaining transactions
+        rebuilt_seen: set = set()
+        for tx in self.model.transactions:
+            key_dt = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
+            key_date = (tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
+            rebuilt_seen.add(key_dt)
+            rebuilt_seen.add(key_date)
+        self.model.seen_tx_keys = rebuilt_seen
         # Remove notes and screenshots for deleted trades
         for key in unique_keys:
             self.model.notes.pop(key, None)
@@ -6679,7 +6793,20 @@ class TradeJournalApp:
 
     def on_closed_filter_change(self) -> None:
         """Update table, summary and chart when the closed-only checkbox is toggled."""
+        if self.closed_only_var.get():
+            self.open_only_var.set(False)
         self.populate_table()
+        self.update_summary_and_chart()
+
+    def on_open_only_change(self) -> None:
+        """Update filters when the open-only checkbox is toggled."""
+        if self.open_only_var.get():
+            self.closed_only_var.set(False)
+        self.populate_table()
+        self.update_summary_and_chart()
+
+    def on_include_open_equity_change(self) -> None:
+        """Refresh summary/chart when Include Open P&L toggles."""
         self.update_summary_and_chart()
 
     def on_group_change(self) -> None:
@@ -6711,6 +6838,7 @@ class TradeJournalApp:
         """Compute and display summary statistics and equity curve chart."""
         account_filter = self.account_var.get()
         closed_only = self.closed_only_var.get()
+        open_only = self.open_only_var.get() if hasattr(self, "open_only_var") else False
         entry_strategy_filter = self.entry_strategy_filter_var.get()
         exit_strategy_filter = self.exit_strategy_filter_var.get()
         exit_start_date = getattr(self, "exit_start_date", None)
@@ -6737,7 +6865,7 @@ class TradeJournalApp:
         has_symbol_filter = bool(symbol_filter_tokens)
         
         # Determine summary - always compute manually if strategy filters are active or top_set is present
-        if top_set is None and not has_strategy_filter and not has_symbol_filter:
+        if top_set is None and not has_strategy_filter and not has_symbol_filter and not open_only:
             summary = self.model.compute_summary(account_filter, closed_only=closed_only,
                                                  start_date=self.start_date, end_date=self.end_date,
                                                  exit_start_date=exit_start_date, exit_end_date=exit_end_date)
@@ -6764,8 +6892,10 @@ class TradeJournalApp:
                 # Symbol filter
                 if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
                     continue
-                # Only consider CLOSED trades (fully exited lots) with status == "CLOSED"
-                if not trade.is_closed:
+                # Closed/open filters
+                if open_only and trade.is_closed:
+                    continue
+                if closed_only and not trade.is_closed:
                     continue
                 # Account filter
                 if account_filter and account_filter != "all" and trade.account_number != account_filter:
@@ -6787,8 +6917,8 @@ class TradeJournalApp:
                 # Closed-only filter now includes partial exits; only skip trades with no exit
                 if closed_only and not trade.exit_date:
                     continue
-                pnl = trade.pnl or 0.0
-                pnl_pct = trade.pnl_pct or 0.0
+                pnl = trade.pnl if trade.pnl is not None else 0.0
+                pnl_pct = trade.pnl_pct if trade.pnl_pct is not None else 0.0
                 total_pnl += pnl
                 num_trades += 1
                 if pnl > 1e-8:  # Win (PnL > 0)
@@ -6855,9 +6985,23 @@ class TradeJournalApp:
                 f"Avg Hold Days W: {summary['avg_hold_winners']:.1f}\n"
                 f"Avg Hold Days L: {summary['avg_hold_losers']:.1f}"
             )
+        open_pnl_current = 0.0
+        missing_syms: List[str] = []
+        if self.include_open_equity_var.get():
+            try:
+                open_pnl_current, missing_syms = self._compute_open_pnl_current(account_filter)
+                if missing_syms:
+                    summary_text += f"\nOpen P&L (current): N/A (missing prices for: {', '.join(sorted(missing_syms))})"
+                else:
+                    summary_text += f"\nOpen P&L (current): {open_pnl_current:.2f}"
+            except Exception:
+                summary_text += "\nOpen P&L (current): N/A"
+        summary_text += f"\nClosed P&L (filtered): {summary['total_pnl']:.2f}"
+        if self.include_open_equity_var.get():
+            summary_text += f"\nClosed + Open (current): {summary['total_pnl'] + open_pnl_current:.2f}"
         self.summary_var.set(summary_text)
         # Compute equity curve DataFrame
-        if top_set is None and not has_strategy_filter and not has_symbol_filter:
+        if top_set is None and not has_strategy_filter and not has_symbol_filter and not open_only:
             eq_df = self.model.equity_curve(account_filter, closed_only=closed_only,
                                              start_date=self.start_date, end_date=self.end_date,
                                              exit_start_date=exit_start_date, exit_end_date=exit_end_date)
@@ -6898,6 +7042,14 @@ class TradeJournalApp:
         
         # Plot modern, aesthetic chart
         self.ax.clear()
+        open_pnl_current_chart = 0.0
+        missing_syms_chart: List[str] = []
+        if self.include_open_equity_var.get():
+            try:
+                open_pnl_current_chart, missing_syms_chart = self._compute_open_pnl_current(account_filter)
+            except Exception:
+                open_pnl_current_chart = 0.0
+                missing_syms_chart = []
         if not eq_df.empty:
             # Convert dates for matplotlib
             dates_dt = pd.to_datetime(eq_df["date"])
@@ -6907,19 +7059,44 @@ class TradeJournalApp:
             self.ax.plot(dates_dt, y_values, linewidth=2.5, color='#1f77b4', label='Cumulative P&L', zorder=3)
             self.ax.fill_between(dates_dt, y_values, alpha=0.25, color='#1f77b4', zorder=2)
 
+            # Store values for cursor annotation (for orange marker)
+            combined_val_for_cursor = None
+            closed_val_for_cursor = None
+            open_pnl_for_cursor = None
+            scatter_artist = None
+
+            if self.include_open_equity_var.get() and len(y_values) > 0:
+                last_date = dates_dt.iloc[-1]
+                closed_val = y_values[-1]
+                combined = closed_val + open_pnl_current_chart
+                scatter_artist = self.ax.scatter([last_date], [combined], color='#ff7f0e', s=60, zorder=4, label='Closed + Open (current)')
+                self.ax.hlines(combined, dates_dt.min(), dates_dt.max(), colors='#ff7f0e', linestyles='--', linewidth=1.2, alpha=0.6)
+                # Store for cursor
+                combined_val_for_cursor = combined
+                closed_val_for_cursor = closed_val
+                open_pnl_for_cursor = open_pnl_current_chart
+
             # Interactive hover tooltip for date + equity value (requires mplcursors)
             try:
                 import mplcursors
                 import matplotlib.dates as mdates
 
-                # Remove old cursor to avoid stacking listeners
+                # Remove old cursors to avoid stacking listeners
                 if getattr(self, '_eq_cursor', None):
                     try:
                         self._eq_cursor.remove()
                     except Exception:
                         pass
+                if getattr(self, '_scatter_cursor', None):
+                    try:
+                        self._scatter_cursor.remove()
+                    except Exception:
+                        pass
 
-                self._eq_cursor = mplcursors.cursor(self.ax.lines, hover=True)
+                # Cursor for the equity line only (exclude the hlines)
+                # Filter to only the main equity line (first line plotted)
+                main_line = [self.ax.lines[0]] if self.ax.lines else []
+                self._eq_cursor = mplcursors.cursor(main_line, hover=mplcursors.HoverMode.Transient)
 
                 @self._eq_cursor.connect("add")
                 def _show_equity_annotation(sel):
@@ -6927,6 +7104,23 @@ class TradeJournalApp:
                     date_str = mdates.num2date(x_val).date().isoformat()
                     sel.annotation.set_text(f"{date_str}\n$ {y_val:,.0f}")
                     sel.annotation.get_bbox_patch().set(fc="white", ec="#1f77b4", alpha=0.9)
+
+                # Cursor for the orange scatter point (closed + open) - only on hover
+                if scatter_artist is not None:
+                    self._scatter_cursor = mplcursors.cursor(scatter_artist, hover=mplcursors.HoverMode.Transient)
+                    
+                    @self._scatter_cursor.connect("add")
+                    def _show_combined_annotation(sel):
+                        x_val, y_val = sel.target
+                        date_str = mdates.num2date(x_val).date().isoformat()
+                        # Show both closed P&L and the open P&L component
+                        text_lines = [f"{date_str}", f"Closed + Open: $ {y_val:,.0f}"]
+                        if closed_val_for_cursor is not None:
+                            text_lines.append(f"Closed P&L: $ {closed_val_for_cursor:,.0f}")
+                        if open_pnl_for_cursor is not None:
+                            text_lines.append(f"Open P&L: $ {open_pnl_for_cursor:,.0f}")
+                        sel.annotation.set_text("\n".join(text_lines))
+                        sel.annotation.get_bbox_patch().set(fc="white", ec="#ff7f0e", alpha=0.9)
             except Exception:
                 pass
             
@@ -6934,6 +7128,9 @@ class TradeJournalApp:
             self.ax.set_xlabel('Date', fontsize=11, fontweight='bold', color='#333333')
             self.ax.set_ylabel('Cumulative P&L ($)', fontsize=11, fontweight='bold', color='#333333')
             self.ax.set_title('Equity Curve', fontsize=13, fontweight='bold', color='#333333', pad=15)
+
+            if self.include_open_equity_var.get():
+                self.ax.legend(loc='upper left')
             
             # Professional grid
             self.ax.grid(True, linestyle='-', linewidth=0.6, alpha=0.3, color='#cccccc', zorder=1)
@@ -6971,6 +7168,111 @@ class TradeJournalApp:
         # Refresh Analysis Two view to reflect current filters
         if hasattr(self, "analysis2_monthly_tree"):
             self.update_analysis_two_view()
+
+    def _compute_open_pnl_current(self, account_filter: Optional[str], fetch_if_missing: bool = True) -> Tuple[float, List[str]]:
+        """Compute unrealized P&L for open positions using latest available close.
+
+        Returns (pnl_value, missing_symbols).
+        """
+        entry_strategy_filter = self.entry_strategy_filter_var.get()
+        exit_strategy_filter = self.exit_strategy_filter_var.get()
+        symbol_filter_tokens = self._parsed_symbol_filter()
+        top_set = getattr(self, "top_filter_set", None)
+        exit_start_date = getattr(self, "exit_start_date", None)
+        exit_end_date = getattr(self, "exit_end_date", None)
+
+        def matches_strategy_filters(trade: TradeEntry) -> bool:
+            key = self.model.compute_key(trade)
+            if entry_strategy_filter and entry_strategy_filter != "all":
+                trade_entry_strategy = self.model.entry_strategies.get(key, "")
+                if entry_strategy_filter.lower() not in trade_entry_strategy.lower():
+                    return False
+            if exit_strategy_filter and exit_strategy_filter != "all":
+                trade_exit_strategy = self.model.exit_strategies.get(key, "")
+                if exit_strategy_filter.lower() not in trade_exit_strategy.lower():
+                    return False
+            return True
+
+        positions: Dict[str, List[Tuple[float, float, dt.date]]] = {}
+        for idx, trade in enumerate(self.model.trades):
+            if trade.is_closed:
+                continue
+            if top_set is not None and idx not in top_set:
+                continue
+            if not matches_strategy_filters(trade):
+                continue
+            if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
+                continue
+            if account_filter and account_filter != "all" and trade.account_number != account_filter:
+                continue
+            if self.start_date and trade.entry_date.date() < self.start_date:
+                continue
+            if self.end_date and trade.entry_date.date() > self.end_date:
+                continue
+            if exit_start_date or exit_end_date:
+                # Align with exit-date filtering behavior: skip opens when exit filters are set
+                continue
+            positions.setdefault(trade.symbol.upper(), []).append((trade.entry_price, trade.quantity, trade.entry_date.date()))
+
+        if not positions:
+            return 0.0, []
+
+        total_pnl = 0.0
+        missing_symbols: List[str] = []
+        today_plus = dt.date.today() + dt.timedelta(days=1)
+        for symbol, entries in positions.items():
+            start_date = min(entry[2] for entry in entries)
+            df = self.price_manager.get_price_data(symbol, start_date, today_plus)
+            if (df is None or df.empty) and HAS_YFINANCE and fetch_if_missing:
+                try:
+                    fetched_df = self.price_manager.fetch_and_store(symbol, start_date, today_plus)
+                    if fetched_df is not None and not fetched_df.empty:
+                        df = self.price_manager.get_price_data(symbol, start_date, today_plus)
+                    else:
+                        df = None
+                except Exception:
+                    df = None
+            if df is None or df.empty:
+                missing_symbols.append(symbol)
+                continue
+            last_close = df['close'].dropna()
+            if last_close.empty:
+                missing_symbols.append(symbol)
+                continue
+            current_price = float(last_close.iloc[-1])
+            for entry_price, qty, _ in entries:
+                total_pnl += (current_price - entry_price) * qty
+
+        return total_pnl, missing_symbols
+
+    def _refresh_open_prices_core(self, account_filter: str) -> Tuple[str, List[str]]:
+        """Fetch open prices and return status + missing symbols."""
+        pnl_val, missing = self._compute_open_pnl_current(account_filter, fetch_if_missing=True)
+        if missing:
+            return (f"Open prices updated; missing: {', '.join(sorted(missing))}", missing)
+        return ("Open prices updated", [])
+
+    def refresh_open_prices(self) -> None:
+        """Fetch price data for open positions (chart tab button)."""
+        account_filter = self.account_var.get()
+        self.chart_status_var.set("Refreshing open prices...")
+        self.root.update_idletasks()
+        try:
+            status_msg, _ = self._refresh_open_prices_core(account_filter)
+            self.chart_status_var.set(status_msg)
+        except Exception as exc:
+            self.chart_status_var.set(f"Error: {exc}")
+        self.update_summary_and_chart()
+
+    def refresh_open_prices_global(self) -> None:
+        """Fetch price data for open positions from the main toolbar."""
+        account_filter = self.account_var.get()
+        try:
+            status_msg, _ = self._refresh_open_prices_core(account_filter)
+            messagebox.showinfo("Refresh Open Prices", status_msg)
+        except Exception as exc:
+            messagebox.showerror("Refresh Open Prices", f"Failed to refresh open prices: {exc}")
+        self.update_summary_and_chart()
 
     def export_journal(self) -> None:
         """Export the current trade journal to CSV or Excel."""
