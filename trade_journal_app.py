@@ -657,12 +657,16 @@ class TradeJournalModel:
         self.duplicate_count = 0
         # Rebuild duplicate keys from the currently loaded transactions to avoid stale entries
         # Keys use both datetime and date-only run_date to tolerate files with/without times
+        # Round floats to avoid floating-point precision issues
         existing_keys: set = set()
         for tx in self.transactions:
-            k_dt = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
+            qty_r = round(tx.quantity, 6)
+            price_r = round(tx.price, 6)
+            amount_r = round(tx.amount, 6)
+            k_dt = (tx.run_date, tx.account_number, tx.symbol, qty_r, price_r, amount_r, tx.action)
             existing_keys.add(k_dt)
             if isinstance(tx.run_date, dt.datetime):
-                existing_keys.add((tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action))
+                existing_keys.add((tx.run_date.date(), tx.account_number, tx.symbol, qty_r, price_r, amount_r, tx.action))
         # Reset seen_tx_keys to the rebuilt set (removes stale keys for deleted trades)
         self.seen_tx_keys = set(existing_keys)
         new_keys: set = set()
@@ -718,13 +722,39 @@ class TradeJournalModel:
                             break
                         except ValueError:
                             continue
+                    # Handle Excel serial date format (integers like 46044)
+                    if run_date is None:
+                        try:
+                            serial = int(run_date_str)
+                            # Excel serial dates: day 1 = 1900-01-01, but Excel incorrectly treats 1900 as leap year
+                            # For dates after Feb 28 1900, we need to subtract 2 from the ordinal
+                            # datetime.date(1899, 12, 30) is the effective epoch for Excel dates
+                            run_date = dt.datetime(1899, 12, 30) + dt.timedelta(days=serial)
+                        except ValueError:
+                            pass
                     if run_date is None:
                         continue
                     # Helper to safely get a cell string
                     def safe_get(idx: Optional[int]) -> str:
                         return row[idx].strip() if (idx is not None and idx < len(row)) else ""
+                    
+                    # Helper to convert scientific notation account numbers to proper integers
+                    def normalize_account_number(s: str) -> str:
+                        """Convert account numbers that may be in scientific notation (e.g., 6.53E+08) to integer strings."""
+                        s = s.strip()
+                        if not s:
+                            return s
+                        # Check if it looks like scientific notation
+                        if 'e' in s.lower():
+                            try:
+                                # Parse as float and convert to integer string
+                                return str(int(float(s)))
+                            except (ValueError, OverflowError):
+                                return s
+                        return s
+                    
                     account = safe_get(account_idx)
-                    acct_num = safe_get(acct_num_idx)
+                    acct_num = normalize_account_number(safe_get(acct_num_idx))
                     action = safe_get(action_idx)
                     symbol = safe_get(symbol_idx)
                     price_str = safe_get(price_idx)
@@ -742,6 +772,13 @@ class TradeJournalModel:
                                 break
                             except ValueError:
                                 continue
+                        # Handle Excel serial date format for settlement date
+                        if settlement_date is None:
+                            try:
+                                serial = int(settle_str)
+                                settlement_date = dt.datetime(1899, 12, 30) + dt.timedelta(days=serial)
+                            except ValueError:
+                                pass
                     # Construct transaction object early to record duplicates if necessary
                     tx = Transaction(
                         run_date=run_date,
@@ -755,8 +792,12 @@ class TradeJournalModel:
                         settlement_date=settlement_date,
                     )
                     # Compute duplicate keys (datetime and date-only)
-                    key_dt = (run_date, acct_num, symbol, qty, price, amount, action)
-                    key_date = (run_date.date(), acct_num, symbol, qty, price, amount, action)
+                    # Round floats to avoid floating-point precision issues in comparisons
+                    qty_r = round(qty, 6)
+                    price_r = round(price, 6)
+                    amount_r = round(amount, 6)
+                    key_dt = (run_date, acct_num, symbol, qty_r, price_r, amount_r, action)
+                    key_date = (run_date.date(), acct_num, symbol, qty_r, price_r, amount_r, action)
                     # Check duplicates both across sessions and within this load
                     if (key_dt in existing_keys or key_date in existing_keys or
                         key_dt in new_keys or key_date in new_keys):
@@ -816,6 +857,7 @@ class TradeJournalModel:
             self.exit_strategies = data.get('exit_strategies', {})
             self.seen_tx_keys = data.get('seen_tx_keys', set())
             # Normalize seen_tx_keys to include action and both datetime/date variants for robustness
+            # Also round floats to 6 decimal places for consistent comparison
             normalized_keys = set()
             for k in self.seen_tx_keys:
                 if not isinstance(k, tuple):
@@ -824,9 +866,9 @@ class TradeJournalModel:
                     run_part = k[0]
                     acct = k[1]
                     sym = k[2]
-                    qty = k[3]
-                    price = k[4]
-                    amt = k[5]
+                    qty = round(k[3], 6) if isinstance(k[3], (int, float)) else k[3]
+                    price = round(k[4], 6) if isinstance(k[4], (int, float)) else k[4]
+                    amt = round(k[5], 6) if isinstance(k[5], (int, float)) else k[5]
                     action = k[6] if len(k) >= 7 else None
                     base_tuple = (run_part, acct, sym, qty, price, amt, action)
                     normalized_keys.add(base_tuple)
@@ -895,7 +937,9 @@ class TradeJournalModel:
         self.trades = []
         self.open_positions = {}
         # Use a sorted copy of transactions for matching to preserve original order in self.transactions
-        sorted_txs = sorted(self.transactions, key=lambda tx: tx.run_date)
+        # Sort by run_date first, then buys before sells (0 for buys, 1 for sells) to ensure
+        # buys are processed before sells on the same day
+        sorted_txs = sorted(self.transactions, key=lambda tx: (tx.run_date, 0 if tx.is_buy else 1))
         # Process buys and sells
         for tx in sorted_txs:
             key = (tx.account_number, tx.symbol)
