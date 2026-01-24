@@ -655,16 +655,16 @@ class TradeJournalModel:
         # Clear previous duplicate records
         self.duplicate_transactions.clear()
         self.duplicate_count = 0
-        # Capture keys from prior sessions (persisted) **and** currently loaded transactions
+        # Rebuild duplicate keys from the currently loaded transactions to avoid stale entries
         # Keys use both datetime and date-only run_date to tolerate files with/without times
-        existing_keys = set(self.seen_tx_keys)
+        existing_keys: set = set()
         for tx in self.transactions:
             k_dt = (tx.run_date, tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action)
             existing_keys.add(k_dt)
             if isinstance(tx.run_date, dt.datetime):
                 existing_keys.add((tx.run_date.date(), tx.account_number, tx.symbol, tx.quantity, tx.price, tx.amount, tx.action))
-        # Ensure we persist the unified key set for future sessions
-        self.seen_tx_keys.update(existing_keys)
+        # Reset seen_tx_keys to the rebuilt set (removes stale keys for deleted trades)
+        self.seen_tx_keys = set(existing_keys)
         new_keys: set = set()
         try:
             with open(filepath, newline="", encoding="utf-8-sig") as f:
@@ -5580,7 +5580,7 @@ class TradeJournalApp:
         price_entry = ttk.Entry(dialog, textvariable=price_var)
         price_entry.grid(row=4, column=1, padx=5, pady=5)
 
-        ttk.Label(dialog, text="Date (YYYY-MM-DD):").grid(row=5, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(dialog, text="Date (preferred M/D/YY):").grid(row=5, column=0, sticky="e", padx=5, pady=5)
         date_var = tk.StringVar()
         date_entry = ttk.Entry(dialog, textvariable=date_var)
         date_entry.grid(row=5, column=1, padx=5, pady=5)
@@ -5622,15 +5622,20 @@ class TradeJournalApp:
             except ValueError:
                 messagebox.showwarning("Invalid Price", "Price must be a number.")
                 return
-            # Parse date/time
+            # Parse date/time using accepted formats (M/D/YY, M/D/YYYY, YYYY-MM-DD, YYYY/MM/DD)
             try:
-                if time_str:
-                    run_dt = dt.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-                else:
-                    run_dt = dt.datetime.strptime(date_str, "%Y-%m-%d")
+                date_obj = self._parse_date_input(date_str, label="Date")
             except ValueError:
-                messagebox.showwarning("Invalid Date/Time", "Date or time format is invalid. Date must be YYYY-MM-DD and time HH:MM.")
                 return
+            if time_str:
+                try:
+                    time_obj = dt.datetime.strptime(time_str, "%H:%M").time()
+                except ValueError:
+                    messagebox.showwarning("Invalid Time", "Time must be HH:MM in 24-hour format.")
+                    return
+            else:
+                time_obj = dt.time(0, 0)
+            run_dt = dt.datetime.combine(date_obj, time_obj)
             # Determine amount and action description
             amount = price * qty
             action_desc = f"Manual {action_choice}" if action_choice else "Manual Entry"
