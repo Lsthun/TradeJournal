@@ -1252,6 +1252,10 @@ class TradeJournalApp:
         self._tree_tooltip_win = None
         self._tree_tooltip_label = None
         self._tree_tooltip_last = (None, None, None)  # (item_id, col_name, text)
+        # Analysis detail tree tooltip state
+        self._analysis_tree_tooltip_win = None
+        self._analysis_tree_tooltip_label = None
+        self._analysis_tree_tooltip_last = (None, None, None)  # (item_id, col_name, text)
         # Keep only one date picker window alive at a time
         self._date_picker_window: Optional[tk.Toplevel] = None
         self._date_picker_allowed_widgets: Set[tk.Widget] = set()
@@ -1472,6 +1476,11 @@ class TradeJournalApp:
         analysis_two_frame = ttk.Frame(self.notebook)
         self.notebook.add(analysis_two_frame, text="Analysis 2")
         self._build_analysis_two_tab(analysis_two_frame)
+
+        # TAB 5: Raw Data
+        raw_data_frame = ttk.Frame(self.notebook)
+        self.notebook.add(raw_data_frame, text="Raw Data")
+        self._build_raw_data_tab(raw_data_frame)
 
         # Build journal tab content using existing layout structure
         self._build_journal_tab(journal_frame)
@@ -1884,6 +1893,10 @@ class TradeJournalApp:
         self.analysis_detail_tree.grid(row=1, column=0, sticky="nsew", padx=(2,0), pady=2)
         vsb.grid(row=1, column=1, sticky="ns", pady=2)
         hsb.grid(row=2, column=0, sticky="ew", padx=2)
+
+        # Setup tooltips for strategy columns in analysis detail tree
+        self.analysis_detail_tree.bind("<Motion>", self._on_analysis_tree_motion)
+        self.analysis_detail_tree.bind("<Leave>", self._on_analysis_tree_leave)
 
         ttk.Button(detail_frame, text="Filter Journal to this Strategy", command=self._filter_journal_from_analysis).grid(row=3, column=0, sticky="e", padx=2, pady=2)
 
@@ -2342,6 +2355,364 @@ class TradeJournalApp:
         except Exception:
             pass
 
+    # ==================== RAW DATA TAB ====================
+
+    def _build_raw_data_tab(self, parent_frame: ttk.Frame) -> None:
+        """Build the Raw Data tab for viewing all transactions."""
+        parent_frame.columnconfigure(0, weight=1)
+        parent_frame.rowconfigure(1, weight=1)
+
+        # Controls frame
+        controls = ttk.LabelFrame(parent_frame, text="Filters & Actions")
+        controls.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        for i in range(10):
+            controls.columnconfigure(i, weight=0)
+        controls.columnconfigure(10, weight=1)
+
+        # Account filter
+        ttk.Label(controls, text="Account:").grid(row=0, column=0, padx=2, pady=2, sticky="e")
+        self.raw_account_var = tk.StringVar(value="all")
+        self.raw_account_dropdown = ttk.Combobox(controls, textvariable=self.raw_account_var, width=12, state="readonly")
+        self.raw_account_dropdown.grid(row=0, column=1, padx=2, pady=2, sticky="w")
+        self.raw_account_dropdown.bind("<<ComboboxSelected>>", lambda e: self._refresh_raw_data_view())
+
+        # Symbol filter
+        ttk.Label(controls, text="Symbol:").grid(row=0, column=2, padx=2, pady=2, sticky="e")
+        self.raw_symbol_var = tk.StringVar(value="")
+        self.raw_symbol_entry = ttk.Entry(controls, textvariable=self.raw_symbol_var, width=10)
+        self.raw_symbol_entry.grid(row=0, column=3, padx=2, pady=2, sticky="w")
+        self.raw_symbol_entry.bind("<Return>", lambda e: self._refresh_raw_data_view())
+
+        # Type filter (Buy/Sell/All)
+        ttk.Label(controls, text="Type:").grid(row=0, column=4, padx=2, pady=2, sticky="e")
+        self.raw_type_var = tk.StringVar(value="All")
+        self.raw_type_dropdown = ttk.Combobox(controls, textvariable=self.raw_type_var, width=8, state="readonly",
+                                               values=["All", "Buys", "Sells"])
+        self.raw_type_dropdown.grid(row=0, column=5, padx=2, pady=2, sticky="w")
+        self.raw_type_dropdown.bind("<<ComboboxSelected>>", lambda e: self._refresh_raw_data_view())
+
+        # Date range
+        ttk.Label(controls, text="From:").grid(row=0, column=6, padx=2, pady=2, sticky="e")
+        self.raw_start_date_var = tk.StringVar(value="")
+        self.raw_start_entry = ttk.Entry(controls, textvariable=self.raw_start_date_var, width=12)
+        self.raw_start_entry.grid(row=0, column=7, padx=2, pady=2, sticky="w")
+
+        ttk.Label(controls, text="To:").grid(row=0, column=8, padx=2, pady=2, sticky="e")
+        self.raw_end_date_var = tk.StringVar(value="")
+        self.raw_end_entry = ttk.Entry(controls, textvariable=self.raw_end_date_var, width=12)
+        self.raw_end_entry.grid(row=0, column=9, padx=2, pady=2, sticky="w")
+
+        # Buttons
+        ttk.Button(controls, text="Apply", command=self._refresh_raw_data_view).grid(row=0, column=10, padx=5, pady=2, sticky="w")
+        ttk.Button(controls, text="Clear Filters", command=self._clear_raw_filters).grid(row=0, column=11, padx=2, pady=2, sticky="w")
+
+        # Second row: Export and info
+        ttk.Button(controls, text="Export Transactions", command=self._export_raw_transactions).grid(row=1, column=0, columnspan=2, padx=2, pady=2, sticky="w")
+        ttk.Button(controls, text="Export Duplicates", command=self._export_raw_duplicates).grid(row=1, column=2, columnspan=2, padx=2, pady=2, sticky="w")
+        ttk.Button(controls, text="Refresh", command=self._refresh_raw_data_view).grid(row=1, column=4, padx=2, pady=2, sticky="w")
+
+        # Summary label
+        self.raw_summary_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=self.raw_summary_var, font=("TkDefaultFont", 9)).grid(row=1, column=5, columnspan=6, padx=10, pady=2, sticky="w")
+
+        # Main content area with transactions treeview
+        content_frame = ttk.Frame(parent_frame)
+        content_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        content_frame.columnconfigure(0, weight=1)
+        content_frame.rowconfigure(0, weight=3)
+        content_frame.rowconfigure(1, weight=1)
+
+        # Transactions treeview
+        tx_frame = ttk.LabelFrame(content_frame, text="Transactions")
+        tx_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+        tx_frame.columnconfigure(0, weight=1)
+        tx_frame.rowconfigure(0, weight=1)
+
+        self.raw_tx_columns = ("run_date", "account", "symbol", "action", "qty", "price", "amount", "settlement")
+        self.raw_tx_headings = {
+            "run_date": "Run Date",
+            "account": "Account",
+            "symbol": "Symbol",
+            "action": "Action",
+            "qty": "Quantity",
+            "price": "Price",
+            "amount": "Amount",
+            "settlement": "Settlement",
+        }
+        self.raw_tx_tree = ttk.Treeview(tx_frame, columns=self.raw_tx_columns, show="headings", selectmode="browse")
+        for col in self.raw_tx_columns:
+            width = 100 if col != "action" else 200
+            anchor = tk.E if col in ("qty", "price", "amount") else tk.W
+            self.raw_tx_tree.heading(col, text=self.raw_tx_headings[col], command=lambda c=col: self._sort_raw_tx(c))
+            self.raw_tx_tree.column(col, width=width, anchor=anchor, stretch=True)
+
+        vsb = ttk.Scrollbar(tx_frame, orient="vertical", command=self.raw_tx_tree.yview)
+        hsb = ttk.Scrollbar(tx_frame, orient="horizontal", command=self.raw_tx_tree.xview)
+        self.raw_tx_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.raw_tx_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        # Duplicates treeview (collapsed by default)
+        dup_frame = ttk.LabelFrame(content_frame, text="Skipped Duplicates (from last import)")
+        dup_frame.grid(row=1, column=0, sticky="nsew")
+        dup_frame.columnconfigure(0, weight=1)
+        dup_frame.rowconfigure(0, weight=1)
+
+        self.raw_dup_tree = ttk.Treeview(dup_frame, columns=self.raw_tx_columns, show="headings", selectmode="browse")
+        for col in self.raw_tx_columns:
+            width = 100 if col != "action" else 200
+            anchor = tk.E if col in ("qty", "price", "amount") else tk.W
+            self.raw_dup_tree.heading(col, text=self.raw_tx_headings[col])
+            self.raw_dup_tree.column(col, width=width, anchor=anchor, stretch=True)
+
+        vsb2 = ttk.Scrollbar(dup_frame, orient="vertical", command=self.raw_dup_tree.yview)
+        hsb2 = ttk.Scrollbar(dup_frame, orient="horizontal", command=self.raw_dup_tree.xview)
+        self.raw_dup_tree.configure(yscrollcommand=vsb2.set, xscrollcommand=hsb2.set)
+        self.raw_dup_tree.grid(row=0, column=0, sticky="nsew")
+        vsb2.grid(row=0, column=1, sticky="ns")
+        hsb2.grid(row=1, column=0, sticky="ew")
+
+        # Initialize sort state
+        self.raw_tx_sort_col = "run_date"
+        self.raw_tx_sort_desc = True
+
+        # Initial population
+        self._update_raw_account_dropdown()
+
+    def _update_raw_account_dropdown(self) -> None:
+        """Update the account dropdown in raw data tab with available accounts."""
+        accounts = set()
+        for tx in self.model.transactions:
+            if tx.account_number:
+                accounts.add(tx.account_number)
+        account_list = ["all"] + sorted(accounts)
+        self.raw_account_dropdown["values"] = account_list
+        if self.raw_account_var.get() not in account_list:
+            self.raw_account_var.set("all")
+
+    def _clear_raw_filters(self) -> None:
+        """Clear all filters in the raw data tab."""
+        self.raw_account_var.set("all")
+        self.raw_symbol_var.set("")
+        self.raw_type_var.set("All")
+        self.raw_start_date_var.set("")
+        self.raw_end_date_var.set("")
+        self._refresh_raw_data_view()
+
+    def _refresh_raw_data_view(self) -> None:
+        """Refresh the raw data treeview with filtered transactions."""
+        # Update account dropdown in case new accounts were loaded
+        self._update_raw_account_dropdown()
+
+        # Get filter values
+        account_filter = self.raw_account_var.get()
+        symbol_filter = self.raw_symbol_var.get().strip().upper()
+        type_filter = self.raw_type_var.get()
+        start_str = self.raw_start_date_var.get().strip()
+        end_str = self.raw_end_date_var.get().strip()
+
+        # Parse dates
+        start_date = self._parse_date_input(start_str) if start_str else None
+        end_date = self._parse_date_input(end_str) if end_str else None
+
+        # Filter transactions
+        filtered = []
+        for tx in self.model.transactions:
+            # Account filter
+            if account_filter and account_filter != "all" and tx.account_number != account_filter:
+                continue
+            # Symbol filter
+            if symbol_filter and symbol_filter not in tx.symbol.upper():
+                continue
+            # Type filter
+            if type_filter == "Buys" and tx.quantity <= 0:
+                continue
+            if type_filter == "Sells" and tx.quantity >= 0:
+                continue
+            # Date filter
+            tx_date = tx.run_date.date() if isinstance(tx.run_date, dt.datetime) else tx.run_date
+            if start_date and tx_date < start_date:
+                continue
+            if end_date and tx_date > end_date:
+                continue
+            filtered.append(tx)
+
+        # Sort
+        def sort_key(tx):
+            if self.raw_tx_sort_col == "run_date":
+                return tx.run_date
+            elif self.raw_tx_sort_col == "account":
+                return tx.account_number
+            elif self.raw_tx_sort_col == "symbol":
+                return tx.symbol
+            elif self.raw_tx_sort_col == "action":
+                return tx.action or ""
+            elif self.raw_tx_sort_col == "qty":
+                return tx.quantity
+            elif self.raw_tx_sort_col == "price":
+                return tx.price
+            elif self.raw_tx_sort_col == "amount":
+                return tx.amount
+            elif self.raw_tx_sort_col == "settlement":
+                return tx.settlement_date or dt.datetime.min
+            return tx.run_date
+
+        filtered.sort(key=sort_key, reverse=self.raw_tx_sort_desc)
+
+        # Clear and populate tree
+        for item in self.raw_tx_tree.get_children():
+            self.raw_tx_tree.delete(item)
+
+        for tx in filtered:
+            run_date_str = tx.run_date.strftime("%Y-%m-%d %H:%M") if isinstance(tx.run_date, dt.datetime) else str(tx.run_date)
+            settle_str = tx.settlement_date.strftime("%Y-%m-%d") if tx.settlement_date else ""
+            action_short = (tx.action[:50] + "...") if tx.action and len(tx.action) > 50 else (tx.action or "")
+            self.raw_tx_tree.insert("", "end", values=(
+                run_date_str,
+                tx.account_number,
+                tx.symbol,
+                action_short,
+                f"{tx.quantity:.2f}",
+                f"${tx.price:.2f}",
+                f"${tx.amount:.2f}",
+                settle_str,
+            ))
+
+        # Update summary
+        total_tx = len(self.model.transactions)
+        shown = len(filtered)
+        buys = sum(1 for tx in filtered if tx.quantity > 0)
+        sells = sum(1 for tx in filtered if tx.quantity < 0)
+        self.raw_summary_var.set(f"Showing {shown:,} of {total_tx:,} transactions  |  Buys: {buys:,}  |  Sells: {sells:,}")
+
+        # Populate duplicates tree
+        for item in self.raw_dup_tree.get_children():
+            self.raw_dup_tree.delete(item)
+
+        for tx in self.model.duplicate_transactions:
+            run_date_str = tx.run_date.strftime("%Y-%m-%d %H:%M") if isinstance(tx.run_date, dt.datetime) else str(tx.run_date)
+            settle_str = tx.settlement_date.strftime("%Y-%m-%d") if tx.settlement_date else ""
+            action_short = (tx.action[:50] + "...") if tx.action and len(tx.action) > 50 else (tx.action or "")
+            self.raw_dup_tree.insert("", "end", values=(
+                run_date_str,
+                tx.account_number,
+                tx.symbol,
+                action_short,
+                f"{tx.quantity:.2f}",
+                f"${tx.price:.2f}",
+                f"${tx.amount:.2f}",
+                settle_str,
+            ))
+
+    def _sort_raw_tx(self, col: str) -> None:
+        """Sort the raw transactions treeview by the given column."""
+        if self.raw_tx_sort_col == col:
+            self.raw_tx_sort_desc = not self.raw_tx_sort_desc
+        else:
+            self.raw_tx_sort_col = col
+            self.raw_tx_sort_desc = True
+        self._refresh_raw_data_view()
+
+    def _export_raw_transactions(self) -> None:
+        """Export filtered transactions to CSV."""
+        # Get current filter state and collect filtered transactions
+        account_filter = self.raw_account_var.get()
+        symbol_filter = self.raw_symbol_var.get().strip().upper()
+        type_filter = self.raw_type_var.get()
+        start_str = self.raw_start_date_var.get().strip()
+        end_str = self.raw_end_date_var.get().strip()
+        start_date = self._parse_date_input(start_str) if start_str else None
+        end_date = self._parse_date_input(end_str) if end_str else None
+
+        filtered = []
+        for tx in self.model.transactions:
+            if account_filter and account_filter != "all" and tx.account_number != account_filter:
+                continue
+            if symbol_filter and symbol_filter not in tx.symbol.upper():
+                continue
+            if type_filter == "Buys" and tx.quantity <= 0:
+                continue
+            if type_filter == "Sells" and tx.quantity >= 0:
+                continue
+            tx_date = tx.run_date.date() if isinstance(tx.run_date, dt.datetime) else tx.run_date
+            if start_date and tx_date < start_date:
+                continue
+            if end_date and tx_date > end_date:
+                continue
+            filtered.append(tx)
+
+        if not filtered:
+            messagebox.showinfo("Export", "No transactions to export with current filters.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Transactions",
+            defaultextension=".csv",
+            filetypes=[("CSV File", "*.csv")],
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Run Date", "Account", "Symbol", "Action", "Quantity", "Price", "Amount", "Settlement Date"])
+                for tx in filtered:
+                    run_date_str = tx.run_date.strftime("%Y-%m-%d %H:%M:%S") if isinstance(tx.run_date, dt.datetime) else str(tx.run_date)
+                    settle_str = tx.settlement_date.strftime("%Y-%m-%d") if tx.settlement_date else ""
+                    writer.writerow([
+                        run_date_str,
+                        tx.account_number,
+                        tx.symbol,
+                        tx.action,
+                        tx.quantity,
+                        tx.price,
+                        tx.amount,
+                        settle_str,
+                    ])
+            messagebox.showinfo("Export", f"Exported {len(filtered):,} transactions to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export: {e}")
+
+    def _export_raw_duplicates(self) -> None:
+        """Export duplicate transactions to CSV."""
+        duplicates = self.model.duplicate_transactions
+        if not duplicates:
+            messagebox.showinfo("Export", "No duplicate transactions to export.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Export Duplicates",
+            defaultextension=".csv",
+            filetypes=[("CSV File", "*.csv")],
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Run Date", "Account", "Symbol", "Action", "Quantity", "Price", "Amount", "Settlement Date"])
+                for tx in duplicates:
+                    run_date_str = tx.run_date.strftime("%Y-%m-%d %H:%M:%S") if isinstance(tx.run_date, dt.datetime) else str(tx.run_date)
+                    settle_str = tx.settlement_date.strftime("%Y-%m-%d") if tx.settlement_date else ""
+                    writer.writerow([
+                        run_date_str,
+                        tx.account_number,
+                        tx.symbol,
+                        tx.action,
+                        tx.quantity,
+                        tx.price,
+                        tx.amount,
+                        settle_str,
+                    ])
+            messagebox.showinfo("Export", f"Exported {len(duplicates):,} duplicate transactions to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export: {e}")
+
+    # ==================== END RAW DATA TAB ====================
+
     def _create_analysis_tree(self, parent: ttk.Frame, title: str) -> Tuple[ttk.LabelFrame, ttk.Treeview]:
         frame = ttk.LabelFrame(parent, text=title)
         frame.columnconfigure(0, weight=1)
@@ -2389,6 +2760,8 @@ class TradeJournalApp:
                 self.refresh_analysis_view()
             if tab_text == "Analysis 2":
                 self.update_analysis_two_view()
+            if tab_text == "Raw Data":
+                self._refresh_raw_data_view()
         except Exception:
             pass
 
@@ -4492,6 +4865,114 @@ class TradeJournalApp:
     def on_tree_leave(self, event: tk.Event = None) -> None:
         """Hide tooltip when mouse leaves the tree."""
         self._hide_tree_tooltip()
+
+    def _hide_analysis_tree_tooltip(self) -> None:
+        """Hide the analysis detail tree tooltip."""
+        if self._analysis_tree_tooltip_win is not None:
+            try:
+                self._analysis_tree_tooltip_win.destroy()
+            except Exception:
+                pass
+        self._analysis_tree_tooltip_win = None
+        self._analysis_tree_tooltip_label = None
+        self._analysis_tree_tooltip_last = (None, None, None)
+
+    def _show_analysis_tree_tooltip(self, text: str, x_root: int, y_root: int) -> None:
+        """Show tooltip for analysis detail tree."""
+        if not text:
+            self._hide_analysis_tree_tooltip()
+            return
+        if self._analysis_tree_tooltip_win is None:
+            win = tk.Toplevel(self.root)
+            win.wm_overrideredirect(True)
+            label = tk.Label(
+                win,
+                text=text,
+                background="#ffffe0",
+                foreground="#000000",
+                relief=tk.SOLID,
+                borderwidth=1,
+                font=("TkDefaultFont", 9),
+                justify=tk.LEFT,
+                anchor="nw",
+                wraplength=400,
+            )
+            label.pack(ipadx=6, ipady=3)
+            self._analysis_tree_tooltip_win = win
+            self._analysis_tree_tooltip_label = label
+        else:
+            if self._analysis_tree_tooltip_label is not None:
+                self._analysis_tree_tooltip_label.configure(text=text, foreground="#000000")
+        self._analysis_tree_tooltip_win.update_idletasks()
+        self._analysis_tree_tooltip_win.wm_geometry(f"+{x_root}+{y_root}")
+
+    def _on_analysis_tree_motion(self, event: tk.Event) -> None:
+        """Show tooltip when hovering over entry/exit strategy cells in analysis detail tree."""
+        try:
+            tree = self.analysis_detail_tree
+            region = tree.identify_region(event.x, event.y)
+            if region != "cell":
+                self._hide_analysis_tree_tooltip()
+                return
+
+            item_id = tree.identify_row(event.y)
+            col_id = tree.identify_column(event.x)
+            if not item_id or not col_id or col_id == "#0":
+                self._hide_analysis_tree_tooltip()
+                return
+
+            try:
+                col_index = int(col_id[1:]) - 1
+            except Exception:
+                self._hide_analysis_tree_tooltip()
+                return
+
+            columns = list(tree["columns"])
+            if col_index < 0 or col_index >= len(columns):
+                self._hide_analysis_tree_tooltip()
+                return
+
+            col_name = columns[col_index]
+            # Only show tooltips for strategy columns
+            if col_name not in {"entry_strat", "exit_strat"}:
+                self._hide_analysis_tree_tooltip()
+                return
+
+            # Get the cell value
+            values = tree.item(item_id, "values")
+            if not values or col_index >= len(values):
+                self._hide_analysis_tree_tooltip()
+                return
+
+            strategy_text = str(values[col_index])
+            if not strategy_text or not strategy_text.strip():
+                self._hide_analysis_tree_tooltip()
+                return
+
+            # Format multi-strategy text as one-per-line for tooltip display
+            tooltip_lines = [p.strip() for p in re.split(r"[,\r\n;\t]|[ ]{2,}", strategy_text) if p.strip()]
+            if tooltip_lines:
+                tooltip_text = "\n".join(tooltip_lines)
+            else:
+                tooltip_text = strategy_text.strip()
+
+            if not tooltip_text:
+                self._hide_analysis_tree_tooltip()
+                return
+
+            last_item, last_col, last_text = self._analysis_tree_tooltip_last
+            if (item_id, col_name, tooltip_text) != (last_item, last_col, last_text):
+                self._analysis_tree_tooltip_last = (item_id, col_name, tooltip_text)
+                self._show_analysis_tree_tooltip(tooltip_text, event.x_root + 12, event.y_root + 12)
+            else:
+                if self._analysis_tree_tooltip_win is not None:
+                    self._analysis_tree_tooltip_win.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        except Exception:
+            self._hide_analysis_tree_tooltip()
+
+    def _on_analysis_tree_leave(self, event: tk.Event = None) -> None:
+        """Hide tooltip when mouse leaves the analysis detail tree."""
+        self._hide_analysis_tree_tooltip()
 
     def on_tree_select(self, event: tk.Event) -> None:
         """Handle selection of a treeview item to load its note."""
@@ -6675,6 +7156,12 @@ class TradeJournalApp:
                 super().__init__(parent)
                 self.title("Select Date")
                 self.resizable(False, False)
+                # Prevent inheriting maximized/zoomed state from parent on macOS
+                self.attributes('-zoomed', False) if hasattr(self, 'attributes') else None
+                try:
+                    self.state('normal')  # Force normal state, not maximized
+                except tk.TclError:
+                    pass
                 self.bind("<Escape>", lambda e: self.destroy())
                 self.var = var
                 # Determine initial month/year from existing value or current date
