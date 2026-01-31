@@ -1168,7 +1168,7 @@ class TradeJournalModel:
                 continue
             if account_filter and account_filter != "all" and trade.account_number != account_filter:
                 continue
-            # Date range filter on entry date (inclusive) - match compute_summary logic
+            # Date range filter on entry date (inclusive) - matches table filtering
             if start_date and trade.entry_date.date() < start_date:
                 continue
             if end_date and trade.entry_date.date() > end_date:
@@ -7045,7 +7045,11 @@ class TradeJournalApp:
                     summary_text += f"\nOpen P&L (current): {open_pnl_current:.2f}"
             except Exception:
                 summary_text += "\nOpen P&L (current): N/A"
-        summary_text += f"\nClosed P&L (filtered): {summary['total_pnl']:.2f}"
+        # Label depends on whether we're viewing open-only or closed trades
+        if open_only:
+            summary_text += f"\nRealized P&L (open trades): {summary['total_pnl']:.2f}"
+        else:
+            summary_text += f"\nClosed P&L (filtered): {summary['total_pnl']:.2f}"
         if self.include_open_equity_var.get():
             summary_text += f"\nClosed + Open (current): {summary['total_pnl'] + open_pnl_current:.2f}"
         self.summary_var.set(summary_text)
@@ -7066,16 +7070,24 @@ class TradeJournalApp:
                 # Symbol filter
                 if symbol_filter_tokens and trade.symbol.upper() not in symbol_filter_tokens:
                     continue
+                # Open-only filter: skip closed trades (equity curve will be empty for open-only view)
+                if open_only and trade.is_closed:
+                    continue
                 if not trade.is_closed or trade.exit_date is None or trade.pnl is None:
                     continue
                 # Account filter
                 if account_filter and account_filter != "all" and trade.account_number != account_filter:
                     continue
-                # Date range filter on exit date
-                exit_date_dt = trade.exit_date.date()
-                if self.start_date and exit_date_dt < self.start_date:
+                # Date range filter on entry date (inclusive) - matches table filtering
+                if self.start_date and trade.entry_date.date() < self.start_date:
                     continue
-                if self.end_date and exit_date_dt > self.end_date:
+                if self.end_date and trade.entry_date.date() > self.end_date:
+                    continue
+                # Date range filter on exit date (inclusive)
+                exit_date_dt = trade.exit_date.date()
+                if exit_start_date and exit_date_dt < exit_start_date:
+                    continue
+                if exit_end_date and exit_date_dt > exit_end_date:
                     continue
                 # Closed-only filter now includes partial exits; only skip trades with no exit
                 if closed_only and not trade.exit_date:
@@ -7202,9 +7214,42 @@ class TradeJournalApp:
             # Tight layout
             self.fig.tight_layout()
         else:
-            self.ax.text(0.5, 0.5, 'No equity data', transform=self.ax.transAxes, 
-                        ha='center', va='center', fontsize=12, color='#999999')
-            self.ax.set_title('Equity Curve', fontsize=13, fontweight='bold', color='#333333', pad=15)
+            # No closed trades equity data - but still show open P&L if enabled
+            if self.include_open_equity_var.get() and open_pnl_current_chart != 0:
+                import datetime as datetime_module
+                today = datetime_module.date.today()
+                today_dt = pd.to_datetime(today)
+                # Plot just the open P&L as a single point at today's date
+                scatter_artist = self.ax.scatter([today_dt], [open_pnl_current_chart], color='#ff7f0e', s=80, zorder=4, label='Open P&L (current)')
+                self.ax.hlines(open_pnl_current_chart, today_dt, today_dt, colors='#ff7f0e', linestyles='--', linewidth=1.2, alpha=0.6)
+                
+                # Add annotation for the open P&L point
+                self.ax.annotate(f'${open_pnl_current_chart:,.0f}', 
+                                xy=(today_dt, open_pnl_current_chart),
+                                xytext=(10, 10), textcoords='offset points',
+                                fontsize=10, color='#ff7f0e',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#ff7f0e', alpha=0.9))
+                
+                self.ax.set_title('Open P&L (No Closed Trades)', fontsize=13, fontweight='bold', color='#333333', pad=15)
+                self.ax.legend(loc='upper left')
+                
+                # Styling
+                self.ax.set_xlabel('Date', fontsize=11, fontweight='bold', color='#333333')
+                self.ax.set_ylabel('P&L ($)', fontsize=11, fontweight='bold', color='#333333')
+                self.ax.grid(True, linestyle='-', linewidth=0.6, alpha=0.3, color='#cccccc', zorder=1)
+                self.ax.set_axisbelow(True)
+                for spine in self.ax.spines.values():
+                    spine.set_edgecolor('#cccccc')
+                    spine.set_linewidth(1)
+                from matplotlib.ticker import FuncFormatter
+                def dollar_formatter(x, pos):
+                    return f'${x:,.0f}'
+                self.ax.yaxis.set_major_formatter(FuncFormatter(dollar_formatter))
+                self.fig.tight_layout()
+            else:
+                self.ax.text(0.5, 0.5, 'No equity data', transform=self.ax.transAxes, 
+                            ha='center', va='center', fontsize=12, color='#999999')
+                self.ax.set_title('Equity Curve', fontsize=13, fontweight='bold', color='#333333', pad=15)
         
         # Draw or refresh canvas (use equity_canvas for the equity curve)
         if self.equity_canvas is None:
